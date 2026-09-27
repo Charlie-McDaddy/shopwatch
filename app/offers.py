@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -150,13 +151,16 @@ def extract_via_cli(subject: str, sender: str, received: str, body: str,
     return parse_cli_output(proc.stdout)
 
 
-IMAGE_PROMPT = """Read the attached screenshot of a retailer marketing email. The
-discount, the deadline and often the whole offer are drawn into the artwork rather than
-written as text, which is why you are being shown a picture.
+IMAGE_PROMPT = """Read the attached screenshots of a retailer marketing email. The
+discount, the deadline, the code and often the whole offer are drawn into the artwork
+rather than written as text, which is why you are being shown pictures.
 
-Read what the artwork actually says. Pay particular attention to the headline number,
-any "ends" or "sign up by" date, and any code. The email's extracted text is below for
-the fine print, but where the two disagree about the offer itself, trust the image.
+The screenshots are consecutive screens of the same email, top to bottom. Read EVERY
+one before answering: the headline and the code are usually in the first, and the
+exclusion list and the fine print are usually in the last. Pay particular attention to
+the headline number, any "ends" or "sign up by" date, any "use code" line, and any
+exclusions block. The email's extracted text is below for the fine print, but where
+the two disagree about the offer itself, trust the images.
 
 Subject: {subject}
 From: {sender}
@@ -167,26 +171,34 @@ Text extracted from the same email (fine print, often incomplete):
 {body}
 ---
 
-Read the image at {image_path} first, then return ONLY a JSON object matching this
-shape, with no prose and no code fence:
+Read these images first, in order:
+{image_list}
+
+Then return ONLY a JSON object matching this shape, with no prose and no code fence:
 {schema}
 """
 
 
-def extract_from_image(image_path: str, subject: str, sender: str, received: str,
-                       body: str, claude_bin: str = "claude",
+def extract_from_image(image_paths: str | Sequence[str], subject: str, sender: str,
+                       received: str, body: str, claude_bin: str = "claude",
                        timeout: int = 240) -> ExtractionResult:
-    """Read the offer out of a rendered screenshot, with the text alongside for context.
+    """Read the offer out of rendered screenshot(s), with the text alongside for context.
 
     One call, not two merged: handing the model both and asking for a single answer
-    avoids inventing a reconciliation rule for fields that disagree.
+    avoids inventing a reconciliation rule for fields that disagree. Several tiles
+    of one email go in the same call for the same reason: the code is on one screen
+    and its exclusions on another, and they belong to one offer.
     """
     import subprocess
 
+    paths = [image_paths] if isinstance(image_paths, str) else list(image_paths)
+    if not paths:
+        return ExtractionResult(None, "claude-cli-vision", "no screenshots to read")
     schema = json.dumps(ExtractedOffer.model_json_schema().get("properties", {}), indent=1)
     prompt = IMAGE_PROMPT.format(
         subject=subject, sender=sender, received=received,
-        body=body[:6000], image_path=image_path, schema=schema,
+        body=body[:6000], schema=schema,
+        image_list="\n".join(f"{i + 1}. {p}" for i, p in enumerate(paths)),
     )
     try:
         proc = subprocess.run(
@@ -204,9 +216,17 @@ def extract_from_image(image_path: str, subject: str, sender: str, received: str
     return ExtractionResult(result.offer, "claude-cli-vision", result.error)
 
 
-#: Fields worth paying for a render to recover. An offer with no amount or no deadline
-#: is barely actionable, and both are typically drawn rather than written.
-WEAK_FIELDS = ("amount", "expires")
+#: Fields worth paying for a render to recover. An offer with no amount, no deadline or
+#: no code is barely actionable, and all three are typically drawn rather than written.
+#:
+#: "code" was added 27 Sep 2026 after The Good Guys' "Just For You" mail of 24 Sep was
+#: recorded with no code at all: the subject carried "20% off" and "Ends Sunday", so
+#: the text pass produced an amount and an expiry, the offer was judged complete, and
+#: the render never ran. The code (JFY2026), the eligible categories and the exclusion
+#: list were all in two banner images. A percent-off offer with no code cannot be
+#: acted on, so it is exactly the case a render is for. An offer that genuinely needs
+#: no code costs one extra render, which is cheap next to missing the code that was there.
+WEAK_FIELDS = ("amount", "expires", "code")
 
 
 def is_weak(offer: ExtractedOffer | None) -> bool:

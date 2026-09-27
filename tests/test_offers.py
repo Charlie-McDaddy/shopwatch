@@ -481,7 +481,7 @@ def test_a_run_reports_what_it_looked_in_not_just_what_it_found():
 def offer(**over):
     base = dict(is_offer=True, kind="percent_off", amount=20, spend_threshold=None,
                 applies_to="a range", categories=["storewide"], excludes=None,
-                code=None, expires="2026-09-13", requires_signup=False,
+                code="SAVE20", expires="2026-09-13", requires_signup=False,
                 confidence="high", summary="20% off")
     base.update(over)
     return offers.ExtractedOffer(**base)
@@ -501,26 +501,60 @@ def test_a_missing_amount_is_worth_rendering():
     assert offers.is_weak(offer(amount=None)) is True
 
 
+def test_a_missing_code_is_worth_rendering():
+    """The Good Guys "Just For You" mail of 24 Sep 2026: "20% off" and "Ends Sunday"
+    in the subject gave the text pass an amount and an expiry, so the offer read as
+    complete, nothing was rendered, and the code that was drawn in the artwork was
+    never recorded. A code-less percent-off cannot be acted on."""
+    assert offers.is_weak(offer(code=None)) is True
+    assert offers.is_weak(offer(code="")) is True
+
+
 def test_a_non_offer_is_never_rendered():
     """A product announcement stays one however prettily it is drawn."""
     assert offers.is_weak(offer(is_offer=False, amount=None, expires=None)) is False
     assert offers.is_weak(None) is False
 
 
-def test_the_render_prompt_names_the_image_and_carries_the_text():
+def test_the_render_prompt_names_every_tile_and_carries_the_text():
     prompt = offers.IMAGE_PROMPT.format(
         subject="s", sender="f", received="r", body="the fine print",
-        image_path="/tmp/shot.png", schema="{}")
-    assert "/tmp/shot.png" in prompt
+        image_list="1. /tmp/a/shot.png\n2. /tmp/b/shot.png", schema="{}")
+    assert "/tmp/a/shot.png" in prompt and "/tmp/b/shot.png" in prompt
     assert "the fine print" in prompt
-    assert "trust the image" in prompt
+    assert "trust the images" in prompt
+    assert "exclusion" in prompt, "the prompt has to ask for the fine print, or the model stops at the headline"
+
+
+def test_extract_from_image_takes_one_path_or_several(monkeypatch):
+    """The subprocess is replaced; this checks what the model is asked, not what it says."""
+    prompts: list[str] = []
+
+    class Done:
+        returncode = 0
+        stdout = '{"is_offer": false, "kind": "none", "amount": null, "spend_threshold": null, "applies_to": "", "categories": [], "excludes": null, "code": null, "expires": null, "requires_signup": false, "confidence": "low", "summary": ""}'
+        stderr = ""
+
+    def fake_run(cmd, input="", **kw):
+        prompts.append(input)
+        return Done()
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    offers.extract_from_image("/tmp/one.png", "s", "f", "r", "body")
+    offers.extract_from_image(["/tmp/a.png", "/tmp/b.png"], "s", "f", "r", "body")
+    assert "1. /tmp/one.png" in prompts[0]
+    assert "1. /tmp/a.png" in prompts[1] and "2. /tmp/b.png" in prompts[1]
+    empty = offers.extract_from_image([], "s", "f", "r", "body")
+    assert empty.offer is None and "no screenshots" in empty.error
+    assert len(prompts) == 2, "an empty tile list must not call the model at all"
 
 
 def test_render_errors_do_not_lose_the_text_answer(monkeypatch):
     """A failed render must degrade to the text result, never discard it."""
     cand = mailwatch.Candidate("<a@x>", "JB Hi-Fi", "f", "s", "2026-09-10", "body", "<html>")
 
-    def boom(html, timeout=120):
+    def boom(html, timeout=120, offset=0):
         raise mailwatch.render.RenderError("chrome timed out")
 
     monkeypatch.setattr(mailwatch.render, "render_html", boom)
