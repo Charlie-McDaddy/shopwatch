@@ -428,6 +428,13 @@ Chrome runs in a container (`zenika/alpine-chrome`), so nothing is installed on 
 and it can see only the one directory it is handed. The screenshots are deleted as soon
 as they have been read.
 
+It also runs with `--disable-dev-shm-usage`, which is not optional. Docker gives the
+container a 64 MB `/dev/shm`, and on image-heavy mail Chrome's GPU process crashes in it
+and exits cleanly with no screenshot, which read as a render that "produced nothing".
+Measured 27 September against the same Good Guys email, five renders each: three of five
+succeeded without the flag, five of five with it. A render that still ends with no file
+gets exactly one more go; a timeout does not.
+
 Two limits, both found by trying:
 
 * **It only works while the offer is live.** The hero images are served from a live URL

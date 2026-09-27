@@ -402,3 +402,58 @@ def test_cleanup_takes_a_list(monkeypatch):
     dirs = [s.parent for s in shots]
     render.cleanup(shots)
     assert not any(d.exists() for d in dirs)
+
+
+# --- Chrome must not crash in Docker's 64MB /dev/shm, and one crash is not a verdict -
+#
+# Measured on opti 27 Sep 2026 against the Good Guys "Just For You" email, five
+# renders each: 3/5 succeeded without --disable-dev-shm-usage ("Reinitialized the
+# GPU process after a crash", exit 0, no file), 5/5 with it. The remaining risk is
+# any other crash that exits cleanly with no screenshot, so that case gets one retry.
+
+
+def test_chrome_is_kept_out_of_dev_shm(monkeypatch):
+    fake = _install(monkeypatch, _succeed_with(lambda offset: 100_000))
+    shot = render.render_html("<p>hi</p>", timeout=120)
+    try:
+        assert "--disable-dev-shm-usage" in fake.run_cmd, fake.run_cmd
+    finally:
+        render.cleanup(shot)
+
+
+def test_a_missing_screenshot_is_retried_once(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(cmd, kw):
+        calls["n"] += 1
+        workdir = Path(cmd[cmd.index("-v") + 1].split(":")[0])
+        if calls["n"] == 2:
+            (workdir / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 100_000)
+        return subprocess.CompletedProcess(cmd, 0, "", "gpu crashed")
+
+    fake = _install(monkeypatch, flaky)
+    shot = render.render_html("<p>hi</p>", timeout=120)
+    try:
+        assert shot.exists()
+        assert len([c for c in fake.calls if c[:2] == ["docker", "run"]]) == 2
+    finally:
+        render.cleanup(shot)
+
+
+def test_two_missing_screenshots_are_still_an_error(monkeypatch):
+    """CONTROL for the retry: it is one more go, not a loop, and the failure keeps
+    its name so the summary says what happened."""
+    fake = _install(monkeypatch, lambda cmd, kw: subprocess.CompletedProcess(cmd, 0, "", "boom"))
+    with pytest.raises(render.RenderError, match="no screenshot"):
+        render.render_html("<p>hi</p>", timeout=120)
+    assert len([c for c in fake.calls if c[:2] == ["docker", "run"]]) == render.ATTEMPTS
+
+
+def test_a_timeout_is_not_retried(monkeypatch):
+    """The subprocess budget is the caller's; spending it twice would double the
+    worst case for the daily job on every dead tracking pixel."""
+    fake = _install(monkeypatch, lambda cmd, kw: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired(cmd, 1)))
+    with pytest.raises(render.RenderError, match="timed out"):
+        render.render_html("<p>hi</p>", timeout=1)
+    assert len([c for c in fake.calls if c[:2] == ["docker", "run"]]) == 1
