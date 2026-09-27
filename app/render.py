@@ -35,6 +35,27 @@ CHROME_IMAGE = os.environ.get("SHOPWATCH_CHROME_IMAGE", "zenika/alpine-chrome:la
 WIDTH = int(os.environ.get("SHOPWATCH_RENDER_WIDTH", "900"))
 HEIGHT = int(os.environ.get("SHOPWATCH_RENDER_HEIGHT", "3200"))
 
+#: How long Chrome itself waits for the page before taking the screenshot anyway.
+#: Marketing email carries tracking pixels and image hosts that never answer, and
+#: Chrome's default is to wait for every one of them. Without this, a single dead
+#: resource ran the render into the subprocess timeout (120s, seen on opti 24 and 26
+#: Sep 2026) and the offer fell back to the text pass, which is exactly the case the
+#: render exists for. Measured on opti 27 Sep 2026: an <img> pointing at a port that
+#: drops the SYN never produced a screenshot in 130s without this flag, and produced
+#: one at 45s with it. `--virtual-time-budget` did NOT help; only `--timeout` did.
+CHROME_TIMEOUT_MS = int(os.environ.get("SHOPWATCH_CHROME_TIMEOUT_MS", "45000"))
+
+#: The offer artwork is often taller than one screen. Chrome's --screenshot only ever
+#: captures the top WIDTHxHEIGHT of the page, so the page is rendered again with the
+#: document shifted up by one screen per tile (a negative top margin injected ahead of
+#: the email's own markup). The Good Guys "Just For You" mail of 24 Sep 2026 put the
+#: code in the first screen and the full exclusion list at about 4,000px, below it.
+TILES = int(os.environ.get("SHOPWATCH_RENDER_TILES", "2"))
+
+#: A tile that is (nearly) blank is not worth a vision call. A blank 900x3200 PNG from
+#: this Chrome build weighs about 18KB; a tile carrying artwork weighs hundreds of KB.
+BLANK_TILE_BYTES = int(os.environ.get("SHOPWATCH_RENDER_BLANK_BYTES", "30000"))
+
 
 class RenderError(RuntimeError):
     """Rendering failed. The caller keeps whatever the text pass produced."""
@@ -79,8 +100,23 @@ def _force_remove(name: str) -> None:
         log.warning("could not remove render container %s: %s", name, exc)
 
 
-def render_html(html: str, timeout: int = 120) -> Path:
+def shifted(html: str, offset: int) -> str:
+    """The email's HTML with the document pulled up by `offset` pixels, so that a
+    fixed-size screenshot shows the NEXT screen of it. Unchanged when offset is 0.
+
+    Injected ahead of the markup rather than into <head>, because marketing email
+    is not reliably well-formed and a style block at the top is honoured either way.
+    """
+    if offset <= 0:
+        return html
+    return f"<style>html{{margin-top:-{int(offset)}px !important}}</style>" + html
+
+
+def render_html(html: str, timeout: int = 120, offset: int = 0) -> Path:
     """Render HTML to a PNG and return its path. The caller owns the file.
+
+    `offset` is how many pixels of the page to skip before the screenshot starts:
+    0 for the first screen, HEIGHT for the second, and so on (see `render_tiles`).
 
     The work directory is world-writable on purpose: the container runs as its own
     user and has to write the screenshot back out. It holds one email for a few
@@ -96,13 +132,15 @@ def render_html(html: str, timeout: int = 120) -> Path:
     name = f"shopwatch-render-{uuid.uuid4().hex[:12]}"
     try:
         os.chmod(workdir, 0o777)
-        (workdir / "email.html").write_text(html, encoding="utf-8", errors="replace")
+        (workdir / "email.html").write_text(shifted(html, offset), encoding="utf-8",
+                                            errors="replace")
         result = subprocess.run(
             [
                 "docker", "run", "--rm", "--name", name,
                 "-v", f"{workdir}:/data",
                 CHROME_IMAGE,
                 "--no-sandbox", "--headless", "--disable-gpu", "--hide-scrollbars",
+                f"--timeout={CHROME_TIMEOUT_MS}",
                 f"--window-size={WIDTH},{HEIGHT}",
                 "--screenshot=/data/shot.png",
                 "file:///data/email.html",
@@ -128,9 +166,41 @@ def render_html(html: str, timeout: int = 120) -> Path:
     return shot
 
 
-def cleanup(shot: Path) -> None:
-    """Remove the screenshot and its directory. One-use artefact, gone when read."""
-    try:
-        shutil.rmtree(shot.parent, ignore_errors=True)
-    except Exception:
-        pass
+def render_tiles(html: str, timeout: int = 120, tiles: int = TILES,
+                 min_bytes: int = BLANK_TILE_BYTES) -> list[Path]:
+    """Render the first `tiles` screens of the email, top down, as separate PNGs.
+
+    Stops early at the first screen that comes back (nearly) blank, because
+    everything below a blank screen is blank too and a vision call on white space
+    buys nothing. The first tile is never skipped: if it is blank, that is a fact
+    about the email and the model gets to say so.
+
+    A failure on a LATER tile does not throw away the earlier ones: the first screen
+    alone recovered the code on the Good Guys mail, and a caller that lost it because
+    the second screen timed out would be worse off than one that never looked.
+    """
+    shots: list[Path] = []
+    for index in range(max(1, tiles)):
+        try:
+            shot = render_html(html, timeout=timeout, offset=index * HEIGHT)
+        except RenderError:
+            if not shots:
+                raise
+            log.warning("tile %d failed to render; keeping the %d before it",
+                        index, len(shots))
+            break
+        if index > 0 and shot.stat().st_size < min_bytes:
+            log.debug("tile %d is blank (%d bytes); stopping", index, shot.stat().st_size)
+            cleanup(shot)
+            break
+        shots.append(shot)
+    return shots
+
+
+def cleanup(shot: Path | list[Path]) -> None:
+    """Remove the screenshot(s) and their directories. One-use artefacts, gone when read."""
+    for one in (shot if isinstance(shot, list) else [shot]):
+        try:
+            shutil.rmtree(one.parent, ignore_errors=True)
+        except Exception:
+            pass

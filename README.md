@@ -394,14 +394,39 @@ pixels. Side by side:
 Without it the board recorded that offer as never expiring, when it actually died two
 days later.
 
-It only runs when the text pass comes back **weak** - a real offer with no amount or no
-deadline. A complete offer never renders, and a product announcement never renders
-however prettily it is drawn, so most mail still costs a single text call. A failed
-render degrades to the text answer rather than discarding it.
+It only runs when the text pass comes back **weak** - a real offer with no amount, no
+deadline or no code. A complete offer never renders, and a product announcement never
+renders however prettily it is drawn, so most mail still costs a single text call. A
+failed render degrades to the text answer rather than discarding it.
+
+"No code" joined the weak list on 27 September 2026, after The Good Guys' "Just For You"
+mail of 24 September was recorded with no code at all. Its subject carried "20% off" and
+"Ends Sunday", so the text pass produced an amount and an expiry, the offer read as
+complete, and the render never ran. The code (`JFY2026`), the eligible categories and
+the exclusion list were all in two banner images. A percent-off with no code cannot be
+acted on, which is exactly what the render is for.
+
+The render takes **tiles**, not one screenshot. Chrome's `--screenshot` only ever
+captures the top 900x3,200 of the page, and that same Good Guys mail put its exclusion
+list at about 4,000px. So the page is rendered again with the document pulled up by one
+screen (a negative top margin injected ahead of the email's markup), up to
+`SHOPWATCH_RENDER_TILES` (default 2) screens, stopping at the first one that comes back
+blank. All tiles go to the model in one call, because the code is on one screen and its
+exclusions on another and they belong to one offer. Measured 27 September: the second
+tile carried the full exclusion block and the fine print, legibly.
+
+Chrome is also told to stop waiting: `--timeout=45000` (`SHOPWATCH_CHROME_TIMEOUT_MS`)
+makes it screenshot whatever has loaded after 45 seconds. Marketing email carries
+tracking pixels and image hosts that never answer, and without the flag Chrome waited for
+every one of them; two of the three renders on opti between 24 and 26 September ran into
+the 120-second subprocess timeout that way and fell back to the text pass. Measured
+27 September: an `<img>` pointing at a port that drops the SYN never produced a screenshot
+in 130 seconds without the flag and produced one at 45 seconds with it.
+`--virtual-time-budget` did not help.
 
 Chrome runs in a container (`zenika/alpine-chrome`), so nothing is installed on the host
-and it can see only the one directory it is handed. The screenshot is deleted as soon as
-it has been read.
+and it can see only the one directory it is handed. The screenshots are deleted as soon
+as they have been read.
 
 Two limits, both found by trying:
 

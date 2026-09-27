@@ -435,18 +435,18 @@ def render_and_read(cand: Candidate, claude_bin: str) -> Any:
     """Render the email and read the offer off the picture. None when there is no HTML."""
     if not cand.html:
         return None
-    shot = None
+    shots: list[Path] = []
     try:
-        shot = render.render_html(cand.html)
+        shots = render.render_tiles(cand.html)
         return offers.extract_from_image(
-            str(shot), cand.subject, cand.sender, cand.received, cand.body,
-            claude_bin=claude_bin,
+            [str(shot) for shot in shots], cand.subject, cand.sender, cand.received,
+            cand.body, claude_bin=claude_bin,
         )
     except render.RenderError as exc:
         return offers.ExtractionResult(None, "render", str(exc))
     finally:
-        if shot is not None:
-            render.cleanup(shot)
+        if shots:
+            render.cleanup(shots)
 
 
 @dataclass

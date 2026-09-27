@@ -283,3 +283,122 @@ def test_non_200_is_not_treated_as_delivered(monkeypatch, token):
         {"render_errors": ["boom"], "rendered": 1},
         url="https://ntfy.example/server-alerts", token_file=str(token))
     assert problem and "403" in problem, f"HTTP 403 read as delivered: {problem!r}"
+
+
+# --- Chrome must give up on dead resources, and the artwork below the fold counts -
+#
+# Two renders in three days on opti (24 and 26 Sep 2026) ran into the 120s subprocess
+# timeout because one tracking pixel or image host never answered, and the offer fell
+# back to the text pass. Measured on opti 27 Sep: without `--timeout` Chrome never
+# screenshotted a page whose <img> pointed at a port that drops the SYN; with it, the
+# screenshot arrived at 45s. And the Good Guys "Just For You" mail put its exclusion
+# list at about 4,000px, below a single 3,200px screen.
+
+
+def _succeed_with(size_by_offset):
+    """A docker stand-in that writes a PNG of a scripted size for each render, keyed
+    on the offset it can read back out of the HTML it was handed."""
+    def on_render(cmd, kw):
+        workdir = Path(cmd[cmd.index("-v") + 1].split(":")[0])
+        html = (workdir / "email.html").read_text(encoding="utf-8")
+        offset = 0
+        if html.startswith("<style>html{margin-top:-"):
+            offset = int(html.split("margin-top:-")[1].split("px")[0])
+        size = size_by_offset(offset)
+        if size is None:
+            raise subprocess.TimeoutExpired(cmd, 1)
+        (workdir / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * size)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    return on_render
+
+
+def test_chrome_is_told_to_stop_waiting(monkeypatch):
+    fake = _install(monkeypatch, _succeed_with(lambda offset: 100_000))
+    shot = render.render_html("<p>hi</p>", timeout=120)
+    try:
+        flags = [a for a in fake.run_cmd if a.startswith("--timeout=")]
+        assert flags == [f"--timeout={render.CHROME_TIMEOUT_MS}"], fake.run_cmd
+        assert render.CHROME_TIMEOUT_MS < 120_000, (
+            "Chrome's own deadline must land before the subprocess timeout, or it is decoration"
+        )
+    finally:
+        render.cleanup(shot)
+
+
+def test_shifted_pulls_the_document_up_and_leaves_the_first_screen_alone():
+    html = "<html><body><h1>x</h1></body></html>"
+    assert render.shifted(html, 0) == html
+    assert render.shifted(html, 3200).startswith("<style>html{margin-top:-3200px !important}</style>")
+    assert render.shifted(html, 3200).endswith(html)
+
+
+def test_a_later_tile_is_rendered_from_the_shifted_page(monkeypatch):
+    seen: list[int] = []
+
+    def on_render(cmd, kw):
+        workdir = Path(cmd[cmd.index("-v") + 1].split(":")[0])
+        html = (workdir / "email.html").read_text(encoding="utf-8")
+        seen.append(int(html.split("margin-top:-")[1].split("px")[0]) if "margin-top:-" in html else 0)
+        (workdir / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 100_000)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    _install(monkeypatch, on_render)
+    shots = render.render_tiles("<p>hi</p>", tiles=3)
+    try:
+        assert seen == [0, render.HEIGHT, 2 * render.HEIGHT], seen
+        assert len(shots) == 3
+    finally:
+        render.cleanup(shots)
+
+
+def test_tiles_stop_at_the_first_blank_screen(monkeypatch):
+    """CONTROL for the blank-tile threshold: a blank 900x3200 PNG from this Chrome
+    build is about 18KB; artwork is hundreds of KB."""
+    fake = _install(monkeypatch, _succeed_with(lambda offset: 500_000 if offset == 0 else 18_000))
+    shots = render.render_tiles("<p>hi</p>", tiles=4)
+    try:
+        assert len(shots) == 1, "the blank second tile should have ended the run"
+        renders = [c for c in fake.calls if c[:2] == ["docker", "run"]]
+        assert len(renders) == 2, "tiles three and four must never be rendered once two is blank"
+    finally:
+        render.cleanup(shots)
+    assert not any(Path(c[c.index("-v") + 1].split(":")[0]).exists() for c in renders), (
+        "the blank tile's work directory was left behind"
+    )
+
+
+def test_the_first_tile_is_kept_even_when_it_is_small(monkeypatch):
+    """A short email is still an email. Only LATER blank tiles are dropped."""
+    _install(monkeypatch, _succeed_with(lambda offset: 18_000))
+    shots = render.render_tiles("<p>hi</p>", tiles=2)
+    try:
+        assert len(shots) == 1
+    finally:
+        render.cleanup(shots)
+
+
+def test_a_failed_later_tile_does_not_lose_the_earlier_ones(monkeypatch):
+    """The first screen alone recovered the code on the Good Guys mail. A second
+    screen that times out must not throw that away."""
+    _install(monkeypatch, _succeed_with(lambda offset: 500_000 if offset == 0 else None))
+    shots = render.render_tiles("<p>hi</p>", tiles=2)
+    try:
+        assert len(shots) == 1 and shots[0].exists()
+    finally:
+        render.cleanup(shots)
+
+
+def test_a_failed_first_tile_is_still_an_error(monkeypatch):
+    """CONTROL. If the first render fails there is nothing to keep, and the caller
+    must hear about it rather than receive an empty list that reads as 'blank email'."""
+    _install(monkeypatch, _succeed_with(lambda offset: None))
+    with pytest.raises(render.RenderError):
+        render.render_tiles("<p>hi</p>", tiles=2)
+
+
+def test_cleanup_takes_a_list(monkeypatch):
+    _install(monkeypatch, _succeed_with(lambda offset: 100_000))
+    shots = render.render_tiles("<p>hi</p>", tiles=2)
+    dirs = [s.parent for s in shots]
+    render.cleanup(shots)
+    assert not any(d.exists() for d in dirs)
