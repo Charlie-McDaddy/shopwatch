@@ -1,93 +1,64 @@
-# Next session brief: 19/09/2026
-Branch: main
+# Next session brief: 27/09/2026
+Branch: main (this baton lands via chore/session-end-2026-09-27)
 
-## What shipped this session
+## What happened this session
 
-18 PRs merged, all deployed and independently verified live (not just CI-green):
-#95, #96, #102, #103, #104, #105, #106, #107, #108, #109, #110, #111, #112, #113,
-#114, #115, #116, #117, #118, #119 (+ this housekeeping commit, about to land).
+No feature work. The session was a buying decision on the soundbar, run against the
+live board plus a few browser and mail reads, then closed unattended.
 
-In rough chronological order:
-- **#95/#96**: historical-low research (kind="historical_low" research jobs), and
-  "add a listing by pasting a URL" (derives retailer from domain, scrapes or queues
-  research).
-- **#102**: optional promo/deal end-date on a listing.
-- **#103**: historical-low research also surfaces other retailers it notices, tick-
-  to-add (with an XSS fix for LLM-relayed URLs, validated at three layers).
-- **#104**: clarified "Add retailer manually" vs "Add from a URL" button labels.
-- **#105**: retailers get a stable hashed colour, shared between axis dot and
-  listing row.
-- **#106/#107**: trigger/excellent/historical_low_price auto-derive from
-  lowest_known_price when unset (never overwrites a hand-set value), plus a one-
-  time startup backfill for products that already existed before this shipped.
-- **#108/#109/#110**: three rounds fixing price-axis label collisions - merging
-  exact-duplicate-value marks, then lane-stacking near-miss collisions, then fixing
-  the lane-stacking's own collision with the bands strip beneath it. Each was
-  reproduced live via direct DOM measurement before being called fixed.
-- **#111**: historical-low date/retailer/notes now shown on the product page, not
-  just buried in Edit.
-- **#112/#113**: retailer exclusion - a new Retailers nav page, cascades to
-  deactivate that retailer's existing listings everywhere, blocks new adds, filters
-  research candidates and pickers, and tells the historical-low LLM prompt directly
-  to disregard excluded retailers (not just filtering its output after the fact).
-- **#114**: groups can now be deleted; an empty group (last member left or deleted)
-  removes itself automatically. Root-caused a real production incident from this: the
-  "Smart Tags" group got auto-deleted, traced to a genuine CSS bug (zero gap between
-  the new Delete-group button and the panel below when a group has no priced
-  candidates), fixed and the group recreated by hand.
-- **#115**: breadcrumbs on every page (a grouped product's crumb names and links its
-  group).
-- **#116/#117/#118**: three rounds of card-margin/max-width sweeps, all found by
-  measuring live rather than eyeballing screenshots - a `.product` card has no
-  padding of its own, every direct child must self-inset, and this bit multiple
-  times until swept comprehensively.
-- **#119**: historical-low notes render as real dot points (`reason_points` in the
-  LLM prompt, `notes_html` Jinja filter + `notesElement` JS twin), with full
-  backward compatibility for old single-paragraph notes. Also fixed the actual cause
-  of a garbled truncation artifact seen live on a real product (a hard 500-char
-  slice cutting mid-sentence).
+- **Soundbar bought.** Samsung HW-Q930H/XY from The Good Guys Morayfield, Click & Collect,
+  order 5QG5W48WG, $679.20 (ticket $849 less the JFY2026 20% code, verified in checkout
+  before purchase). Recorded on the board via `POST /api/products/1/purchase`; product 1
+  is now PURCHASED with purchase row 4. VERIFIED against the live API after the write.
+  An Ezymount ESB15B VESA soundbar bracket ($59, code not applicable) went in the same
+  order; it is in the purchase notes, not a board product.
+- **Price-match question answered, no code change.** The Good Guys' only published price
+  guarantee names 11 approved competitors and Appliance Central is not one; promo-code
+  prices are excluded anyway. Pre-purchase matching is store discretion with no written
+  terms. The 20% code beat Appliance Central's $725 delivered without a match.
+- **One test fixed on this branch.** `tests/test_api.py::test_adding_a_listing_with_a_promo_end_date`
+  hard-coded `2026-09-21` as a future promo date and started failing on a clean tree on
+  22 Sep. Nobody noticed because CI last ran 19 Sep (the 25 Sep runs were Dependabot only).
+  Now uses `date.today() + 30 days`. VERIFIED: full suite green locally after the fix,
+  ruff clean.
 
-Plus this session-end housekeeping commit: two README gaps filled in (the backfill
-mechanism, group deletion/auto-cleanup weren't documented at all).
+## Files touched
 
-## Files touched (34)
-
-`app/main.py`, `app/store.py`, `app/pricing.py`, `app/research.py`,
-`app/provenance.py`, `app/ingest.py`, `app/url_intake.py`,
-`deploy/research-runner.py`, `app/static/app.js`, `app/static/style.css`, five
-templates (`base.html`, `_product.html`, `product.html`, `group.html`,
-`retailers.html`), six new migrations (0010-0015), README.md, and eleven test files.
+`tests/test_api.py` (test-only fix) and this file. Nothing else in the repo changed.
+The live DB on opti changed (purchase row 4, product 1 status).
 
 ## Verification
 
-**VERIFIED**: `521 passed in 14.94s` (pytest), `ruff check .` clean throughout every
-PR. No Node/Hugo/Vite build step in this stack. Every UI-affecting change was
-independently confirmed against the live `shop.home.lunt.au` deployment (direct DOM
-measurement via javascript_tool, not just screenshots) after each deploy, not just
-trusted from CI.
+- pytest: full suite green after the fix (count in the PR's CI run). ruff: clean.
+- No build step in this stack.
+- 0 open issues, 0 open PRs before this one. VERIFIED via `gh`.
 
 ## Open follow-ups
 
-- **0 open GitHub issues**, **0 open PRs**. Everything filed this session got built
-  and merged in the same session.
-- `~/.claude/instructions/repo-setup.md` is 273 hand-written lines, ~3.7x the next-
-  largest instruction file - GUESSING it's worth a trim pass, but unverified this
-  session (never read its content, just counted lines).
-- A few PRs left explicit open design questions in their bodies that nobody has
-  weighed in on yet, worth a look if any of this feels wrong in practice:
-  - #105: retailer colour is hashed globally (same colour on every product a
-    retailer appears on), not reset per-product like the group page's candidate
-    colours.
-  - #106: `kind` column on `research_jobs` vs a separate table for historical-low
-    jobs (mirrors `llm_jobs`' existing pattern, reversible if wanted).
-  - #113: excluding a retailer does NOT retroactively remove it from a group's
-    already-drawn axis/candidate list on group pages specifically (only from
-    product-level adds/research/pickers) - not verified either way this session.
+- **mailwatch loses the code on image-only campaigns.** Offer 20 (The Good Guys "Just
+  For You", 24 Sep) was recorded with `code=None`, `excludes=None`, confidence medium,
+  because the whole offer is two banner images and the extractor only saw alt text. The
+  code (JFY2026), the eligible categories and the exclusions were all in the images and
+  were only recovered by pulling the mail out of iCloud Trash by hand and reading the
+  PNGs. Offer 8 (same retailer, 10 Sep) DID get its exclusions, via `claude-cli-vision`,
+  so the render path exists but did not fire or did not help for offer 20. Worth a look
+  at why `--render` produced nothing usable there. LIKELY the highest-value fix on the
+  board right now, since a code-less percent-off offer cannot be acted on.
+- **`record_purchase` does not lower `lowest_known_price`.** Product 1's low stayed at
+  $705 (Appliance Central, 24 Sep) after a $679.20 purchase was recorded; the view shows
+  `moved_since_purchase: 45.8` instead. May be deliberate (a purchase is not a listing
+  observation). GUESSING; decide whether a confirmed paid price should count as a low.
+- **Appliance Central seller note is stale.** Listing 2's note still says "SAVENOW $60"
+  against a $1050 headline; the listing now carries $765 with a $40 hand-entered coupon
+  (26 Sep). The note was not updated with the numbers. Cosmetic, batch it.
+- **Other hard-coded dates in tests** (`2026-12-25` in test_api.py line ~267,
+  `2026-09-13` expiries in test_offers.py) only assert stored values, not lapsed status,
+  so they should not time-bomb. LIKELY, not exhaustively checked.
+- `~/.claude/instructions/repo-setup.md` is 273 hand-written lines, well over the 55-line
+  trim threshold; flagged last session too, still unread.
 
-## Suggested starting point next session
+## Suggested starting point
 
-Nothing broken or pending: this was a long, self-contained UI/feature session for
-shopwatch and everything shipped is live and confirmed. Natural next step is just
-using the app normally (you'll notice anything still off faster than a sweep will)
-or picking up one of the three design questions above if any of them are bugging
-you in practice.
+Look at why mailwatch's render/vision leg produced nothing for offer 20 (image-only
+Good Guys campaign) while it worked for offer 8, then decide whether a recorded purchase
+should lower the product's known low. Product 1 is done; no price watching needed on it.

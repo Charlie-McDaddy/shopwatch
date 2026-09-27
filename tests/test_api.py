@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 from app import provenance, store
 from app.db import connect
@@ -221,19 +222,22 @@ def test_adding_a_listing_through_the_api(client):
 def test_adding_a_listing_with_a_promo_end_date(client):
     """Issue #97: an optional, manually-entered promo end-date on a listing."""
     product = q930h(client)
+    # Relative, not hard-coded: a fixed "future" date lapses and the test starts
+    # failing on a clean tree (it did, on 22 Sep 2026, with the date 2026-09-21).
+    ends = date.today() + timedelta(days=30)
     response = client.post(
         f"/api/products/{product['id']}/retailers",
         json={"retailer": "Centre Com", "advertised_price": 99, "condition": "NEW",
-              "price_valid_until": "2026-09-21"},
+              "price_valid_until": ends.isoformat()},
     )
     assert response.status_code == 201
     listing = response.json()
-    assert listing["price_valid_until"] == "2026-09-21"
+    assert listing["price_valid_until"] == ends.isoformat()
     assert listing["provenance"]["price_valid_until"]["manual_locked"] == 1
     assert listing["promo_lapsed"] is False
 
     body = client.get(f"/products/{product['id']}").text
-    assert "ends 21 Sep" in body
+    assert f"ends {ends.day} {ends.strftime('%b')}" in body
 
 
 def test_a_lapsed_promo_end_date_is_flagged_but_not_rejected(client):
