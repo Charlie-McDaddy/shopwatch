@@ -56,6 +56,21 @@ TILES = int(os.environ.get("SHOPWATCH_RENDER_TILES", "2"))
 #: this Chrome build weighs about 18KB; a tile carrying artwork weighs hundreds of KB.
 BLANK_TILE_BYTES = int(os.environ.get("SHOPWATCH_RENDER_BLANK_BYTES", "30000"))
 
+#: Chrome's flags. `--disable-dev-shm-usage` is not optional: Docker gives the container
+#: a 64MB /dev/shm and Chrome's GPU process crashes in it on image-heavy mail, exiting 0
+#: with no screenshot. Measured on opti 27 Sep 2026 against The Good Guys "Just For You"
+#: email, five renders each: 3/5 without the flag ("Reinitialized the GPU process after a
+#: crash"), 5/5 with it. The alternative, `docker run --shm-size=512m`, also scored 5/5
+#: but needs a docker-level option; the Chrome flag needs nothing from the host.
+CHROME_FLAGS = (
+    "--no-sandbox", "--headless", "--disable-gpu", "--disable-dev-shm-usage",
+    "--hide-scrollbars",
+)
+
+#: A render that exits cleanly with no file is a crash, not a verdict, and a crash is
+#: not deterministic. One more go before giving up costs a few seconds.
+ATTEMPTS = 2
+
 
 class RenderError(RuntimeError):
     """Rendering failed. The caller keeps whatever the text pass produced."""
@@ -118,13 +133,30 @@ def render_html(html: str, timeout: int = 120, offset: int = 0) -> Path:
     `offset` is how many pixels of the page to skip before the screenshot starts:
     0 for the first screen, HEIGHT for the second, and so on (see `render_tiles`).
 
-    The work directory is world-writable on purpose: the container runs as its own
-    user and has to write the screenshot back out. It holds one email for a few
-    seconds and is removed by the caller.
+    A run that ends with no screenshot is retried once (see ATTEMPTS); a timeout or
+    any other failure is not, because those are not the flaky case and the caller's
+    own budget is already spent on them.
     """
     if not available():
         raise RenderError("docker is not available on this machine")
+    last: RenderError | None = None
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return _render_once(html, timeout, offset)
+        except RenderError as exc:
+            if "no screenshot produced" not in str(exc) or attempt == ATTEMPTS:
+                raise
+            last = exc
+            log.warning("render attempt %d produced no screenshot, retrying: %s",
+                        attempt, exc)
+    raise last  # pragma: no cover - the loop always returns or raises
 
+
+def _render_once(html: str, timeout: int, offset: int) -> Path:
+    """One docker run. The work directory is world-writable on purpose: the container
+    runs as its own user and has to write the screenshot back out. It holds one email
+    for a few seconds and is removed by the caller.
+    """
     workdir = Path(tempfile.mkdtemp(prefix="shopwatch-render-"))
     # Named, because the container has to be killable by something other than the
     # `docker run` process. Without a name, Docker invents one and the only handle
@@ -139,7 +171,7 @@ def render_html(html: str, timeout: int = 120, offset: int = 0) -> Path:
                 "docker", "run", "--rm", "--name", name,
                 "-v", f"{workdir}:/data",
                 CHROME_IMAGE,
-                "--no-sandbox", "--headless", "--disable-gpu", "--hide-scrollbars",
+                *CHROME_FLAGS,
                 f"--timeout={CHROME_TIMEOUT_MS}",
                 f"--window-size={WIDTH},{HEIGHT}",
                 "--screenshot=/data/shot.png",
