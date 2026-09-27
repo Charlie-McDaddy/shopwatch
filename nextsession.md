@@ -1,64 +1,68 @@
-# Next session brief: 27/09/2026
-Branch: main (this baton lands via chore/session-end-2026-09-27)
+# Next session brief: 27/09/2026 (second close of the day)
+Branch: main (this baton lands via chore/session-end-2026-09-27b)
 
-## What happened this session
+## What shipped this session
 
-No feature work. The session was a buying decision on the soundbar, run against the
-live board plus a few browser and mail reads, then closed unattended.
+Three PRs, all merged with regular merges, CI green, each deploy verified by the checkout
+on opti rather than by the run. VERIFIED.
 
-- **Soundbar bought.** Samsung HW-Q930H/XY from The Good Guys Morayfield, Click & Collect,
-  order 5QG5W48WG, $679.20 (ticket $849 less the JFY2026 20% code, verified in checkout
-  before purchase). Recorded on the board via `POST /api/products/1/purchase`; product 1
-  is now PURCHASED with purchase row 4. VERIFIED against the live API after the write.
-  An Ezymount ESB15B VESA soundbar bracket ($59, code not applicable) went in the same
-  order; it is in the purchase notes, not a board product.
-- **Price-match question answered, no code change.** The Good Guys' only published price
-  guarantee names 11 approved competitors and Appliance Central is not one; promo-code
-  prices are excluded anyway. Pre-purchase matching is store discretion with no written
-  terms. The 20% code beat Appliance Central's $725 delivered without a match.
-- **One test fixed on this branch.** `tests/test_api.py::test_adding_a_listing_with_a_promo_end_date`
-  hard-coded `2026-09-21` as a future promo date and started failing on a clean tree on
-  22 Sep. Nobody noticed because CI last ran 19 Sep (the 25 Sep runs were Dependabot only).
-  Now uses `date.today() + 30 days`. VERIFIED: full suite green locally after the fix,
-  ruff clean.
+- **#121** (3708b2d): time-bomb test fix (`test_adding_a_listing_with_a_promo_end_date`
+  hard-coded 2026-09-21 as a future date) plus the morning baton.
+- **#122** (22d5c32): mailwatch reads image-only offers. `code` joined `WEAK_FIELDS` so a
+  code-less percent-off renders; `render_tiles()` captures two 900x3200 screens by
+  injecting a negative top margin, stops at a blank tile, sends all tiles to the model in
+  one call; Chrome gets `--timeout=45000` so dead tracking pixels no longer run the render
+  into the 120 s subprocess timeout.
+- **#123** (1e99115): `--disable-dev-shm-usage` (Chrome's GPU process crashed in Docker's
+  64 MB `/dev/shm` on image-heavy mail, exit 0, no file: 3/5 renders as shipped, 5/5 with
+  the flag) plus one retry for a screenshot-less run. Found because the first live run of
+  #122 died that way.
+
+**After-fix control on the deployed code (1e99115), against the saved HTML of the real
+Good Guys "Just For You" email:** two tiles in 4 s, vision in 11 s, `code=JFY2026`,
+expiry 2026-09-27, full exclusions block read. The JB Hi-Fi email that timed out on 26 Sep
+renders both tiles in 3 s. VERIFIED, results also posted as a comment on #123.
+
+Also this session, no code: the soundbar was bought (order 5QG5W48WG, $679.20, purchase
+row 4, product 1 PURCHASED) and the Good Guys price-match question answered. Details in
+the previous baton in git history and in memory.
 
 ## Files touched
 
-`tests/test_api.py` (test-only fix) and this file. Nothing else in the repo changed.
-The live DB on opti changed (purchase row 4, product 1 status).
+`app/render.py`, `app/offers.py`, `app/mailwatch.py`, `tests/test_render.py`,
+`tests/test_offers.py`, `tests/test_api.py`, `README.md`, this file. Eight files.
 
 ## Verification
 
-- pytest: full suite green after the fix (count in the PR's CI run). ruff: clean.
-- No build step in this stack.
-- 0 open issues, 0 open PRs before this one. VERIFIED via `gh`.
+- pytest exit 0 locally after every change; CI `test`, `lint`, `audit` green on every PR
+  head and on main. ruff clean.
+- Deploy tree on opti at 1e99115, `healthz` ok. VERIFIED.
+- 0 open issues, 0 open PRs.
 
 ## Open follow-ups
 
-- **mailwatch loses the code on image-only campaigns.** Offer 20 (The Good Guys "Just
-  For You", 24 Sep) was recorded with `code=None`, `excludes=None`, confidence medium,
-  because the whole offer is two banner images and the extractor only saw alt text. The
-  code (JFY2026), the eligible categories and the exclusions were all in the images and
-  were only recovered by pulling the mail out of iCloud Trash by hand and reading the
-  PNGs. Offer 8 (same retailer, 10 Sep) DID get its exclusions, via `claude-cli-vision`,
-  so the render path exists but did not fire or did not help for offer 20. Worth a look
-  at why `--render` produced nothing usable there. LIKELY the highest-value fix on the
-  board right now, since a code-less percent-off offer cannot be acted on.
+- **egress-watch digests on every render.** Each render loads the retailer image hosts
+  (AWS, Cloudflare) and egress-watch batches them into an ntfy digest; today's test
+  renders fired several. The daily mailwatch run will do the same on any email that
+  renders. Allowlisting those destinations in `opti-stacks/egress-watch/allowlist.conf`
+  (narrow CIDR + 443) is Rodney's call, not done. LIKELY the first thing that annoys.
+- **Offer 20 on the board still has `code=None`.** The offer expired 27 Sep, so it was
+  not re-recorded. Nothing to do unless a re-extract of past mail is wanted, and past
+  mail renders as "offer ended" anyway (README, "Reading the artwork").
 - **`record_purchase` does not lower `lowest_known_price`.** Product 1's low stayed at
-  $705 (Appliance Central, 24 Sep) after a $679.20 purchase was recorded; the view shows
-  `moved_since_purchase: 45.8` instead. May be deliberate (a purchase is not a listing
-  observation). GUESSING; decide whether a confirmed paid price should count as a low.
-- **Appliance Central seller note is stale.** Listing 2's note still says "SAVENOW $60"
-  against a $1050 headline; the listing now carries $765 with a $40 hand-entered coupon
-  (26 Sep). The note was not updated with the numbers. Cosmetic, batch it.
-- **Other hard-coded dates in tests** (`2026-12-25` in test_api.py line ~267,
-  `2026-09-13` expiries in test_offers.py) only assert stored values, not lapsed status,
-  so they should not time-bomb. LIKELY, not exhaustively checked.
-- `~/.claude/instructions/repo-setup.md` is 273 hand-written lines, well over the 55-line
-  trim threshold; flagged last session too, still unread.
+  $705 after a $679.20 purchase; the view shows `moved_since_purchase` instead. May be
+  deliberate. GUESSING; decide whether a paid price should count as a low.
+- **Appliance Central seller note is stale** (says "SAVENOW $60" against a $1050
+  headline; listing carries $765 with a $40 coupon). Cosmetic, batch it.
+- **A render that produces the screenshot but Chrome still exits non-zero** is not
+  handled specially; the existing "no screenshot" and timeout paths cover what was seen.
+  GUESSING there is no such case; nothing observed.
+- `~/.claude/instructions/repo-setup.md` is 273 hand-written lines, well over the
+  55-line threshold; flagged three closes running, still unread.
 
 ## Suggested starting point
 
-Look at why mailwatch's render/vision leg produced nothing for offer 20 (image-only
-Good Guys campaign) while it worked for offer 8, then decide whether a recorded purchase
-should lower the product's known low. Product 1 is done; no price watching needed on it.
+Watch the next two daily mailwatch runs (10:00 Brisbane) in `journalctl -u
+shopwatch-mailwatch.service`: expect "rendered N" lines on any real offer without a code,
+no "RENDER FAILED" lines, and a code on any recorded percent-off. If egress-watch digests
+are the only noise, allowlist the image hosts and move on.
