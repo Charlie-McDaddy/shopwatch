@@ -24,7 +24,7 @@
      group actually had notes set. #}
   {% if group.notes %}<p class="muted" style="margin:0 20px 12px">{{ group.notes }}</p>{% endif %}
   {% if group.archived %}
-    <p class="verdict bought">Resolved - a purchase in this group archived the rest.</p>
+    <p class="verdict bought">Group archived.</p>
   {% endif %}
 
   {{ c.ruler({"scale": group.scale, "best_listing": none}) }}

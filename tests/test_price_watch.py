@@ -216,3 +216,32 @@ def test_the_flag_note_is_the_warning_that_caused_it(wired, monkeypatch):
             " WHERE lower(r.name) = 'jb hi-fi'").fetchone()
         note = provenance.verification_map(conn, row["id"])["model"]["note"]
     assert "model mismatch" in note, f"the note must explain the flag, got {note!r}"
+
+
+def test_purchase_keeps_grouped_candidate_listings_in_the_watch(wired, monkeypatch):
+    with connect(wired) as conn:
+        retailer = conn.execute("SELECT id FROM retailers WHERE adapter = 'jb_hifi'").fetchone()
+        a = store.create_product(conn, {"name": "Candidate A", "model": "GROUP-A"})
+        b = store.create_product(conn, {"name": "Candidate B", "model": "GROUP-B"})
+        group_id = store.create_group(conn, {"name": "GPU options"})
+        store.set_product_group(conn, a, group_id)
+        store.set_product_group(conn, b, group_id)
+        for product_id, slug in ((a, "candidate-a"), (b, "candidate-b")):
+            store.create_listing(conn, {
+                "product_id": product_id, "retailer_id": retailer["id"],
+                "url": f"https://www.jbhifi.com.au/{slug}",
+            })
+        store.record_purchase(conn, a, {"price_paid": 899})
+        conn.commit()
+
+    checked_models = []
+
+    def check(self, url, expected_model=None):
+        checked_models.append(expected_model)
+        return Observation(advertised_price=899.0)
+
+    monkeypatch.setattr(retailers.base.RetailerAdapter, "check", check, raising=True)
+    summary = price_watch.run(send_alerts=False)
+
+    assert summary["checked"] >= 2
+    assert {"GROUP-A", "GROUP-B"} <= set(checked_models)

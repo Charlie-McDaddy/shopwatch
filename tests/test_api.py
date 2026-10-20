@@ -1290,3 +1290,21 @@ def test_household_location_form_and_local_options_are_honest(client):
     assert "manual; location not verified" in body
     assert "within 25 km" in body
     assert client.get(f"/api/price-history/{product['id']}").json() == history_before
+
+
+def test_purchase_in_a_group_keeps_its_candidates_visible_and_sibling_active(client):
+    a = client.post("/api/products", json={"name": "Candidate A", "model": "GROUP-A"}).json()
+    b = client.post("/api/products", json={"name": "Candidate B", "model": "GROUP-B"}).json()
+    group = client.post(f"/api/products/{a['id']}/group", json={"name": "GPU options"}).json()
+    group_id = group["group_id"]
+    client.post(f"/api/products/{b['id']}/group", json={"group_id": group_id})
+
+    response = client.post(f"/api/products/{a['id']}/purchase", json={"price_paid": 899})
+    assert response.status_code == 201
+
+    sibling = client.get(f"/api/products/{b['id']}").json()
+    assert sibling["status"] == "ACTIVE" and sibling["archived"] == 0
+    page = client.get(f"/groups/{group_id}").text
+    assert "Candidate A" in page and "Candidate B" in page
+    assert "GPU options" in client.get("/").text
+    assert "2 candidates" in client.get("/").text

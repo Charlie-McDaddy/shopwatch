@@ -1,8 +1,7 @@
 """Watch groups: several different products tracked as competing candidates.
 
-Buying one settles the question for the rest, and an archived product (whether via a
-group purchase cascade or the standalone "give up" button) must never be researchable
-again.
+Purchasing one candidate leaves every other candidate watched until it is explicitly
+paused or removed.
 """
 
 from __future__ import annotations
@@ -156,7 +155,7 @@ def test_status_counts_excludes_a_purchased_member_of_a_still_active_group(conn,
     assert counts["ALL"] == 1
 
 
-def test_buying_one_candidate_archives_the_rest_of_the_group(conn, two_candidates):
+def test_buying_one_candidate_keeps_the_other_candidates_watched(conn, two_candidates):
     a, b = two_candidates
     group_id = store.create_group(conn, {"name": "GPU search"})
     conn.commit()
@@ -171,8 +170,11 @@ def test_buying_one_candidate_archives_the_rest_of_the_group(conn, two_candidate
     other = store.get_product(conn, b)
     assert bought["status"] == "PURCHASED"
     assert not bought["archived"]  # the purchased one itself is not archived
-    assert other["archived"] == 1
-    assert store.get_group(conn, group_id)["archived"] == 1
+    assert other["archived"] == 0
+    assert other["status"] == "ACTIVE"
+    assert store.get_group(conn, group_id)["archived"] == 0
+    group = store.group_view(conn, group_id)
+    assert {member["id"] for member in group["members"]} == {a, b}
 
 
 def test_buying_a_standalone_product_does_not_touch_unrelated_products(conn, two_candidates):
@@ -185,7 +187,7 @@ def test_buying_a_standalone_product_does_not_touch_unrelated_products(conn, two
     assert not store.get_product(conn, b)["archived"]
 
 
-def test_undo_purchase_does_not_revive_archived_group_siblings(conn, two_candidates):
+def test_undo_purchase_leaves_group_siblings_unchanged(conn, two_candidates):
     a, b = two_candidates
     group_id = store.create_group(conn, {"name": "GPU search"})
     conn.commit()
@@ -199,14 +201,13 @@ def test_undo_purchase_does_not_revive_archived_group_siblings(conn, two_candida
     conn.commit()
 
     assert store.get_product(conn, a)["status"] == "ACTIVE"
-    assert store.get_product(conn, b)["archived"] == 1  # still archived, not revived
+    assert store.get_product(conn, b)["archived"] == 0  # still watched throughout
 
 
-def test_purchased_product_stays_visible_on_the_board_after_its_group_resolves(
+def test_group_and_candidates_stay_visible_on_board_after_purchase(
     conn, two_candidates
 ):
-    """The control this test exists for: a purchased, non-archived product must never
-    become invisible just because its now-archived group stopped rendering a card."""
+    """A purchase changes one candidate's state without hiding the group or its peers."""
     a, b = two_candidates
     group_id = store.create_group(conn, {"name": "GPU search"})
     conn.commit()
@@ -217,14 +218,13 @@ def test_purchased_product_stays_visible_on_the_board_after_its_group_resolves(
     store.record_purchase(conn, a, {"price_paid": 899})
     conn.commit()
 
-    # The group itself is gone from the board (archived)...
-    assert store.list_groups(conn) == []
-    # ...but the purchased product must still appear in the ungrouped board list,
-    # because its group no longer renders a card that would show it instead.
-    ungrouped = store.list_products(conn, status="ALL", exclude_grouped=True)
-    assert a in {p["id"] for p in ungrouped}
-    # The other, archived candidate correctly stays hidden either way.
-    assert b not in {p["id"] for p in ungrouped}
+    # The group card remains visible, and names both the purchase and active alternative.
+    groups = store.list_groups(conn)
+    assert len(groups) == 1
+    assert {member["id"] for member in groups[0]["members"]} == {a, b}
+    assert store.get_product(conn, a)["status"] == "PURCHASED"
+    assert store.get_product(conn, b)["status"] == "ACTIVE"
+    assert store.status_counts(conn)["ALL"] == 1  # the purchased candidate is on the group card
 
 
 def test_research_job_refuses_on_an_archived_product(conn, two_candidates):
@@ -289,10 +289,7 @@ def test_delete_group_if_empty_only_fires_with_no_members_left(conn, two_candida
 
 
 def test_an_archived_member_still_counts_as_belonging_to_its_group(conn, two_candidates):
-    """A resolved group (a purchase archived the rest) must not auto-delete just
-    because every remaining member is archived - "these were the candidates, this
-    one won" is real history, group_id is untouched on purpose by
-    archive_other_group_members, and delete_group_if_empty must respect that."""
+    """Explicitly archiving alternatives keeps the group as historical context."""
     a, b = two_candidates
     group_id = store.create_group(conn, {"name": "GPU search"})
     store.set_product_group(conn, a, group_id)

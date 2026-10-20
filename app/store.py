@@ -548,7 +548,6 @@ def record_purchase(
         "UPDATE products SET status = 'PURCHASED', updated_at = ? WHERE id = ?",
         (utcnow(), product_id),
     )
-    archive_other_group_members(conn, product_id)
     # The purchase is itself an observation, and the best one: it is a price someone
     # actually paid rather than one a page advertised.
     conn.execute(
@@ -571,9 +570,8 @@ def undo_purchase(conn: sqlite3.Connection, product_id: int) -> bool:
     The price_history row is deliberately left behind: it records a price that really was
     paid, and history is append-only even when the bookkeeping was wrong.
 
-    Deliberately does not revive any group sibling that this purchase archived. Which
-    candidates you would still want back in the hunt is not derivable from "the purchase
-    was undone" - reviving them is a decision for whoever undid it, done by hand.
+    Group siblings remain in their existing watch state; undoing a purchase only changes
+    the purchased product and leaves its append-only price observation behind.
     """
     purchase = latest_purchase(conn, product_id)
     if not purchase:
@@ -638,13 +636,12 @@ def set_product_group(
 
 
 def archive_other_group_members(conn: sqlite3.Connection, purchased_product_id: int) -> int:
-    """Buying one candidate settles the question for the rest of its group.
+    """Explicitly archive every alternative to a chosen group candidate.
 
-    Archives every OTHER product in the same group (never the one just purchased -
-    its own status is already PURCHASED) and marks the group itself archived, so its
-    board card stops appearing and none of its members can start a new research job
-    (research.create_job refuses on an archived product). Returns how many were
-    archived, for the caller to report.
+    This lifecycle operation is separate from recording a purchase: purchase does not
+    determine whether the household wants to keep watching the other candidates. Archives
+    every OTHER product in the same group and marks the group itself archived. Returns
+    how many products were archived.
     """
     product = get_product(conn, purchased_product_id)
     if product is None or product["group_id"] is None:
@@ -728,10 +725,9 @@ def delete_group_if_empty(conn: sqlite3.Connection, group_id: int) -> bool:
     """Delete a group once nothing points at it any more, and only then.
 
     "Empty" means no product's group_id references it - not "every member is
-    archived". A resolved group (a purchase archived the rest, see
-    archive_other_group_members) keeps every member's group_id exactly as it was:
-    "these were the candidates, this one won" is real history, the same reason a
-    product is archived rather than deleted. Auto-deleting on that would erase it.
+    archived". An explicitly resolved group keeps every member's group_id exactly as it
+    was: "these were the candidates" is useful history, the same reason a product is
+    archived rather than deleted. Auto-deleting on that would erase it.
     This only fires from an action that actually detaches a product from the group -
     "Leave group", or a permanent product delete - never from archiving.
 
@@ -765,9 +761,9 @@ def list_products(
     groups separately. The JSON API (GET /api/products) leaves this off by default, so
     an API consumer still sees every product, grouped or not.
 
-    Only excludes membership in a STILL-ACTIVE group. Once a group resolves (a purchase
-    archived the rest and the group itself), the purchased product's own group_id is
-    left untouched as a historical fact - "which candidates it was chosen over" - but
+    Only excludes membership in a STILL-ACTIVE group. If a group is explicitly archived,
+    the product's own group_id is left untouched as a historical fact - "which candidates
+    were considered" - but
     that must never make the product itself invisible: its own group's card has
     stopped rendering (list_groups excludes archived groups), so if this exclusion
     still hid it too, a purchased, non-archived product would vanish from the board
@@ -802,9 +798,8 @@ def status_counts(conn: sqlite3.Connection) -> dict[str, int]:
     PARKED) member of a still-active group has no such stand-in: nothing on the
     board shows it as bought, so counting it there produced a "Bought 1" badge
     that opened onto an empty tab - a resolved-looking number with nothing behind
-    it. Excluded here for any status but ACTIVE; once its group archives (a real
-    purchase resolves the hunt) group_id stays but the exclusion no longer
-    applies, and it counts normally.
+    it. It is excluded from status tallies while its active group represents it on the
+    group card. A purchase leaves the active group and its alternatives intact.
     """
     rows = conn.execute(
         """
