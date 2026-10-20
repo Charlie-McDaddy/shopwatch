@@ -4,10 +4,10 @@
 
 {% block content %}
 <div class="filters">
-  {% for s in statuses + ['ALL'] %}
+  {% for s in board_statuses %}
     <a class="chip" href="/?status={{ s }}&amp;sort={{ sort }}"
        {% if status == s %}aria-current="true"{% endif %}>{{
-       {'ACTIVE':'Hunting','PURCHASED':'Bought','PARKED':'Parked','ALL':'Everything'}[s] }}<span
+       {'ACTIVE':'Hunting','PURCHASED':'Bought','PARKED':'Parked','ALL':'Everything','ARCHIVED':'Archived'}[s] }}<span
        class="n">{{ counts.get(s, 0) }}</span></a>
   {% endfor %}
   <span style="flex:1"></span>
@@ -34,6 +34,15 @@
 {% for product in products %}
   {% call c.card(product) %}
     <a class="btn" href="/products/{{ product.id }}">Open</a>
+    {% if status == 'ARCHIVED' %}
+      <button data-restore-product="{{ product.id }}">Restore</button>
+    {% elif product.status == 'PARKED' %}
+      <button data-resume-product="{{ product.id }}">Resume</button>
+      <button data-archive-product="{{ product.id }}" class="danger">Remove</button>
+    {% else %}
+      <button data-pause-product="{{ product.id }}">Pause</button>
+      <button data-archive-product="{{ product.id }}" class="danger">Remove</button>
+    {% endif %}
   {% endcall %}
 {% else %}
 {% if not groups %}

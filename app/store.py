@@ -30,7 +30,7 @@ VERDICTS = ["BUY", "MAYBE", "IGNORE"]
 
 #: Where a product sits in the process, as distinct from the verdict on it.
 #: ACTIVE    - being researched or hunted, alerts armed
-#: PURCHASED - bought; alerts off unless a price-protection window is open
+#: PURCHASED - bought; the active card remains watched
 #: PARKED    - set aside without deleting anything
 STATUSES = ["ACTIVE", "PURCHASED", "PARKED"]
 
@@ -723,9 +723,11 @@ def list_products(
     still hid it too, a purchased, non-archived product would vanish from the board
     entirely.
     """
-    clauses = [] if include_archived else ["archived = 0"]
+    clauses = ["archived = 1"] if status and status.upper() == "ARCHIVED" else (
+        [] if include_archived else ["archived = 0"]
+    )
     params: list[Any] = []
-    if status and status.upper() != "ALL":
+    if status and status.upper() not in ("ALL", "ARCHIVED"):
         clauses.append("status = ?")
         params.append(status.upper())
     if exclude_grouped:
@@ -767,7 +769,10 @@ def status_counts(conn: sqlite3.Connection) -> dict[str, int]:
         """
     )
     counts = {row["status"]: row["n"] for row in rows}
-    counts["ALL"] = sum(counts.values())
+    counts["ARCHIVED"] = conn.execute(
+        "SELECT COUNT(*) FROM products WHERE archived = 1"
+    ).fetchone()[0]
+    counts["ALL"] = sum(count for status, count in counts.items() if status != "ARCHIVED")
     return counts
 
 

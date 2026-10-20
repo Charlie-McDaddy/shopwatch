@@ -1625,7 +1625,7 @@ wire('pu-save', async () => {
   };
   try {
     await api(`/api/products/${productId}/purchase`, { method: 'POST', body });
-    toast('Purchase recorded. Alerts for this product are off.', 'good');
+    toast('Purchase recorded. The card stays watched.', 'good');
     location.reload();
   } catch (err) { toast(`Could not record the purchase: ${err.message}`, 'bad'); }
 });
@@ -1641,7 +1641,7 @@ wire('btn-undo-purchase', async event => {
 });
 
 wire('btn-give-up-product', async event => {
-  if (!confirm('Give up on this? It comes off the board, but every listing, price and history row is kept, so it is not gone for good.')) return;
+  if (!confirm('Remove this card? It leaves the board, but its listings and history are kept and can be restored.')) return;
   const productId = Number(event.currentTarget.dataset.product);
   try {
     await api(`/api/products/${productId}`, { method: 'DELETE' });
@@ -1649,6 +1649,32 @@ wire('btn-give-up-product', async event => {
     location.href = '/';
   } catch (err) { toast(`Could not archive: ${err.message}`, 'bad'); }
 });
+
+document.querySelectorAll('[data-archive-product]').forEach(button => button.addEventListener('click', async () => {
+  const id = button.dataset.archiveProduct;
+  if (!confirm('Remove this card? It leaves the board, but its listings and history are kept and can be restored.')) return;
+  try {
+    await api(`/api/products/${id}`, { method: 'DELETE' });
+    location.href = '/';
+  } catch (err) { toast(`Could not remove card: ${err.message}`, 'bad'); }
+}));
+
+for (const [attribute, status, archived, message] of [
+  ['data-pause-product', 'PARKED', undefined, 'Watch paused.'],
+  ['data-resume-product', 'ACTIVE', undefined, 'Watch resumed.'],
+  ['data-restore-product', undefined, 0, 'Card restored.']
+]) {
+  document.querySelectorAll(`[${attribute}]`).forEach(button => button.addEventListener('click', async () => {
+    const id = button.getAttribute(attribute);
+    try {
+      await api(`/api/products/${id}`, { method: 'PATCH', body: {
+        ...(status ? { status } : {}), ...(archived !== undefined ? { archived } : {})
+      }});
+      location.href = status === 'PARKED' ? `/products/${id}` : '/';
+      toast(message, 'good');
+    } catch (err) { toast(`Could not update watch: ${err.message}`, 'bad'); }
+  }));
+}
 
 wire('btn-delete-product', () => {
   document.getElementById('del-confirm-name').value = '';

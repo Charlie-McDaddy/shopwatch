@@ -11,13 +11,22 @@
   <button id="btn-edit-product">Edit</button>
   <button id="btn-add-listing">Add retailer manually</button>
   <button id="btn-add-listing-url">Add from a URL (auto-check price)</button>
-  <button id="btn-watch-product" data-product="{{ product.id }}">Check prices now</button>
-  <button id="btn-research-retailers" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research retailers again</button>
-  <button id="btn-research-historical-low" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research historical low</button>
-  {% if product.status == 'PURCHASED' %}
+  {% if not product.archived and product.status != 'PARKED' %}
+    <button id="btn-watch-product" data-product="{{ product.id }}">Check prices now</button>
+    <button id="btn-research-retailers" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research retailers again</button>
+    <button id="btn-research-historical-low" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research historical low</button>
+  {% endif %}
+{% if product.purchase %}
     <button id="btn-undo-purchase" data-product="{{ product.id }}">Undo purchase</button>
   {% else %}
     <button id="btn-mark-purchased" class="primary">I bought this</button>
+  {% endif %}
+  {% if product.archived %}
+    <button data-restore-product="{{ product.id }}">Restore</button>
+  {% elif product.status == 'PARKED' %}
+    <button data-resume-product="{{ product.id }}">Resume watching</button>
+  {% else %}
+    <button data-pause-product="{{ product.id }}">Pause watching</button>
   {% endif %}
   {% if product.group_id %}
     <a class="btn" href="/groups/{{ product.group_id }}">In a group</a>
@@ -60,7 +69,7 @@
   </footer>
 </dialog>
 
-{% if product.purchase %}
+  {% if product.purchase %}
 <div class="panel" style="padding:0;overflow:hidden">
   <div class="bought-strip">
     <span>Bought {{ product.purchase.purchased_at[:10] }}{% if product.purchase.retailer_name %}
@@ -71,7 +80,7 @@
       <span>Price protection {{ 'runs to' if product.protection_open else 'closed' }}
         {{ product.purchase.price_protection_until }}</span>
     {% else %}
-      <span class="muted">No price-protection window, so checking has stopped.</span>
+      <span class="muted">No price-protection window.</span>
     {% endif %}
   </div>
 </div>
@@ -186,9 +195,9 @@
       <label>Condition <select id="pu-condition">{% for c in conditions %}<option>{{ c }}</option>{% endfor %}</select></label>
       <label>Order number <input id="pu-order"></label>
       <label>Warranty, months <input id="pu-warranty" type="number" step="1"></label>
-      <label>Keep watching until
+      <label>Price protection through
         <input id="pu-protection" type="date">
-        <small>Optional. Tells you if it drops below what you paid, for a price guarantee.</small>
+        <small>Optional. Alert if a confirmed price drops below what you paid.</small>
       </label>
       <label class="wide">Notes <input id="pu-notes"></label>
     </div>

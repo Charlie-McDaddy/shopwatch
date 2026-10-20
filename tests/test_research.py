@@ -479,3 +479,17 @@ def test_report_historical_low_keeps_a_candidate_once_it_is_un_excluded(conn, pr
     assert json.loads(job["historical_low_other_retailers"]) == [
         {"name": "Bing Lee", "url": "https://www.binglee.com.au/x"},
     ]
+
+
+def test_paused_product_cannot_start_or_resume_queued_research(conn, product_id, retailer_ids):
+    job_id = research.create_job(conn, product_id, retailer_ids)
+    store.update_product(conn, product_id, {"status": "PARKED"})
+    conn.commit()
+
+    with pytest.raises(ValueError, match="paused or archived"):
+        research.create_job(conn, product_id, retailer_ids)
+    assert research.claim_next_queued(conn) is None
+
+    store.update_product(conn, product_id, {"status": "ACTIVE"})
+    conn.commit()
+    assert research.claim_next_queued(conn)["id"] == job_id

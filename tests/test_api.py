@@ -1148,3 +1148,32 @@ def test_notes_html_handles_empty_input():
     assert str(_notes_html(None)) == ""
     assert str(_notes_html("")) == ""
     assert str(_notes_html("   \n  ")) == ""
+
+
+def test_pause_resume_and_restore_keep_the_same_product_and_history(client):
+    product = client.post("/api/products", json={"name": "Widget", "model": "W-1"}).json()
+    pid = product["id"]
+    client.post("/api/products", json={"name": "Elsewhere", "model": "W-2"})
+    listing = client.post(
+        f"/api/products/{pid}/retailers", json={"retailer": "Crowdshop", "advertised_price": 100}
+    ).json()
+    client.post(f"/api/products/{pid}/purchase", json={"price_paid": 100, "listing_id": listing["id"]})
+    history_before = client.get(f"/api/price-history/{pid}").json()
+
+    assert client.patch(f"/api/products/{pid}", json={"status": "PARKED"}).json()["status"] == "PARKED"
+    assert client.post("/api/research-jobs", json={"product_id": pid, "retailer_ids": [listing["retailer_id"]]}).status_code == 400
+    assert client.delete(f"/api/products/{pid}").status_code == 200
+    assert client.get(f"/products/{pid}").status_code == 200
+    assert client.get("/?status=ARCHIVED").status_code == 200
+    archived_page = client.get("/?status=ARCHIVED").text
+    assert "Widget" in archived_page and "Restore" in archived_page
+    assert "Elsewhere" not in archived_page
+    assert "Elsewhere" in client.get("/?status=ALL").text
+
+    restored = client.patch(f"/api/products/{pid}", json={"archived": 0}).json()
+    assert restored["id"] == pid
+    assert restored["listings"][0]["id"] == listing["id"]
+    assert client.get(f"/api/price-history/{pid}").json() == history_before
+    purchases = client.get("/api/purchases").json()
+    assert any(row["product_id"] == pid for row in purchases)
+    assert client.patch(f"/api/products/{pid}", json={"status": "ACTIVE"}).json()["status"] == "ACTIVE"

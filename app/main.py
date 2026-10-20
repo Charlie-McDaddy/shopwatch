@@ -231,7 +231,9 @@ def jsonable(value: Any) -> Any:
 def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> Any:
     with session() as conn:
         products = store.list_products(
-            conn, status=None if status == "ALL" else status, exclude_grouped=True
+            conn, include_archived=status == "ARCHIVED",
+            status=None if status == "ALL" else status,
+            exclude_grouped=True,
         )
         for product in products:
             product["listings"] = store.listings_for_product(conn, product, sort=sort)
@@ -245,9 +247,10 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
         # question as whether this is a brand-new install with nothing in it at all -
         # the onboarding panel belongs only to the second case, regardless of which tab
         # happens to be selected when someone lands here with an empty database.
-        is_new_install = counts.get("ALL", 0) == 0 and not conn.execute(
-            "SELECT 1 FROM watch_groups LIMIT 1"
-        ).fetchone()
+        is_new_install = (
+            not conn.execute("SELECT 1 FROM products LIMIT 1").fetchone()
+            and not conn.execute("SELECT 1 FROM watch_groups LIMIT 1").fetchone()
+        )
     return templates.TemplateResponse(
         request,
         "board.html",
@@ -260,6 +263,7 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
             "counts": counts,
             "is_new_install": bool(is_new_install),
             "statuses": store.STATUSES,
+            "board_statuses": store.STATUSES + ["ARCHIVED", "ALL"],
             "config": load_config(),
             "classes": pricing.CLASS_LABELS,
             "version": ASSET_VERSION,
@@ -646,10 +650,10 @@ def api_delete_product_permanently(product_id: int) -> Any:
 
 @app.post("/api/products/{product_id}/purchase", status_code=201)
 def api_record_purchase(product_id: int, payload: dict = Body(...)) -> Any:
-    """Mark a product bought. Moves it to PURCHASED and stops its alerts.
+    """Record a purchase while keeping the product's card watched.
 
-    Set `price_protection_until` (YYYY-MM-DD) to keep watching inside a retailer's price
-    guarantee window; leave it off and the watch stops for this product entirely.
+    Set `price_protection_until` (YYYY-MM-DD) to enable purchase-specific price
+    protection alerts in addition to the card's ordinary watch.
     """
     with session() as conn:
         if store.get_product(conn, product_id) is None:

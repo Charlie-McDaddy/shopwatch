@@ -159,19 +159,12 @@ def run(
         run_id = _open_run(conn, trigger)
         summary["run_id"] = run_id
 
-        # Only products still being hunted are checked, plus purchased ones inside an
-        # open price-protection window. Polling a retailer about something already bought
-        # and not under protection is a request nobody reads the answer to.
+        # A purchase keeps the card's watch active; pausing or archiving it stops checks.
         where = (
-            "WHERE l.active = 1 AND ("
-            "  p.status = 'ACTIVE'"
-            "  OR (p.status = 'PURCHASED' AND EXISTS ("
-            "       SELECT 1 FROM purchases pu WHERE pu.product_id = p.id"
-            "         AND pu.price_protection_until IS NOT NULL"
-            "         AND substr(pu.price_protection_until, 1, 10) >= ?))"
-            ")"
+            "WHERE l.active = 1 AND p.archived = 0"
+            " AND p.status IN ('ACTIVE', 'PURCHASED')"
         )
-        params: list = [utcnow()[:10]]
+        params: list = []
         if product_id:
             where += " AND l.product_id = ?"
             params.append(product_id)
