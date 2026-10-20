@@ -1045,8 +1045,8 @@ instead and it still records cleanly.
 
 Recording a purchase:
 
-* moves the product to `PURCHASED`, which **stops its alerts** and takes it out of the
-  watch, so a bought item does not keep telling you its price is good;
+* moves the product to `PURCHASED` while keeping its card watched, so repeat-purchase
+  products can still alert on future specials;
 * writes a `price_history` row with source `purchase` and `freight_resolved = 1`, because
   a price someone actually paid is the most trustworthy observation there is;
 * keeps everything else. `DELETE /api/products/{id}/purchase` undoes the record and returns
@@ -1056,11 +1056,13 @@ Recording a purchase:
 ### Price protection
 
 `price_protection_until` (a `YYYY-MM-DD` date) is optional and off by default. Set it and
-the watch keeps running on that product and raises a **Price protection** alert if a
+the watch can also raise a **Price protection** alert if a
 *confirmed* delivered price drops below what you paid, which is what you need to claim
 against a retailer's price guarantee. Unconfirmed prices are ignored: sending someone to a
 checkout to discover it was never actually cheaper is worse than saying nothing. Leave the
-field empty and buying simply stops the watch.
+field empty and the ordinary watch continues. Pause the card to suspend checks and
+alerts, or use **Remove** to archive it and retain its history. **Restore** is available
+from the Archived board view.
 
 ## Importing external research
 
