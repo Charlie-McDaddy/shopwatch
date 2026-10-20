@@ -314,6 +314,9 @@
   </div>
 
   <p class="verdict {{ product.tone }}">{{ product.verdict_line }}</p>
+  {% if product.quantity and product.quantity_unit %}
+  <p class="small muted" style="margin:0 20px 8px">Pack: {{ product.quantity }} {{ product.quantity_unit }}{% if product.best_unit_price %} &middot; {% if product.best_resolved %}Best{% else %}Estimate{% endif %}: {{ product.best_unit_price[0]|money }} per {{ product.best_unit_price[1] }}{% if not product.best_resolved %} (freight unresolved){% endif %}{% endif %}</p>
+  {% endif %}
 
   {% if product.offers %}
     {% for o in product.offers %}

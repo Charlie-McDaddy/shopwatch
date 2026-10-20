@@ -18,6 +18,7 @@ PRODUCT_FIELDS = [
     "name", "model", "brand", "category", "generation", "verdict", "status", "notes",
     "trigger_price", "excellent_price", "historical_low_price",
     "lowest_known_price", "lowest_known_date", "lowest_known_retailer", "lowest_known_notes",
+    "quantity", "quantity_unit",
     "width_mm", "height_mm", "depth_mm", "weight_kg",
     "packaged_width_mm", "packaged_height_mm", "packaged_depth_mm", "packaged_weight_kg",
     "mounting_notes", "vesa", "fit_notes", "archived",
@@ -179,6 +180,7 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
 
 
 def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
+    _validate_quantity(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     payload.setdefault("category", "general")
     payload.setdefault("verdict", "MAYBE")
@@ -199,6 +201,7 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str, Any]) -> None:
+    _validate_quantity(data, current=get_product(conn, product_id))
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     if "specs" in data:
         payload["specs_json"] = json.dumps(data["specs"] or {})
@@ -228,6 +231,23 @@ def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str,
         f"UPDATE products SET {assignments} WHERE id = ?", [*payload.values(), product_id]
     )
     maybe_derive_price_targets(conn, product_id)
+
+
+def _validate_quantity(data: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> None:
+    quantity = data.get("quantity", current["quantity"] if current else None)
+    unit = data.get("quantity_unit", current["quantity_unit"] if current else None)
+    if quantity is None and unit in (None, ""):
+        return
+    if not isinstance(unit, str) or unit not in {"g", "kg", "ml", "L", "each"}:
+        raise ValueError("quantity unit must be g, kg, ml, L, or each")
+    if isinstance(quantity, bool):
+        raise ValueError("quantity must be a positive number")
+    try:
+        amount = float(quantity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quantity must be a positive number") from exc
+    if not 0 < amount < float("inf"):
+        raise ValueError("quantity must be a positive number")
 
 
 def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
@@ -365,6 +385,8 @@ def product_view(
     best = pricing.best_listing(listings, load_config().unresolved_freight_penalty)
     product["best_listing"] = best
     product["best_delivered"] = best["delivered_price"] if best else None
+    product["best_unit_price"] = pricing.unit_price(
+        product["best_delivered"], product.get("quantity"), product.get("quantity_unit"))
     product["best_retailer"] = best["retailer_name"] if best else None
     product["best_classification"] = best["classification"] if best else pricing.UNRESOLVED
     product["best_resolved"] = bool(best and best["delivered_resolved"])

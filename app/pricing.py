@@ -27,6 +27,24 @@ CLASS_LABELS = {
     UNRESOLVED: "UNRESOLVED",
 }
 
+def unit_price(
+    price: float | None, quantity: float | None, unit: str | None
+) -> tuple[float, str] | None:
+    """Return AUD per kg, L, or each; unknown and unsupported quantities stay unknown."""
+    try:
+        amount, cost = float(quantity), float(price)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0 or cost < 0 or not amount < float("inf") or not cost < float("inf"):
+        return None
+    factors = {"g": (1000, "kg"), "kg": (1, "kg"), "ml": (1000, "L"),
+               "L": (1, "L"), "each": (1, "each")}
+    if unit not in factors:
+        return None
+    factor, label = factors[unit]
+    return round(cost * factor / amount, 2), label
+
+
 CONDITIONS = [
     "NEW",
     "FACTORY_SECOND",

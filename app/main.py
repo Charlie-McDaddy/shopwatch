@@ -603,7 +603,10 @@ def api_update_product(product_id: int, payload: dict = Body(...)) -> Any:
     with session() as conn:
         if store.get_product(conn, product_id) is None:
             raise HTTPException(404, "no such product")
-        store.update_product(conn, product_id, payload)
+        try:
+            store.update_product(conn, product_id, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return jsonable(store.product_view(conn, product_id))
 
 

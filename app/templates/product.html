@@ -288,6 +288,8 @@
       <label>Brand <input id="ep-brand" value="{{ product.brand or '' }}"></label>
       <label>Category <input id="ep-category" value="{{ product.category }}" list="cat-list"></label>
       <label>Generation <input id="ep-generation" value="{{ product.generation or '' }}"></label>
+      <label>Pack quantity <input id="ep-quantity" type="number" min="0" step="any" value="{{ product.quantity or '' }}"></label>
+      <label>Quantity unit <select id="ep-quantity_unit"><option value="">Unknown</option>{% for unit in ['g', 'kg', 'ml', 'L', 'each'] %}<option value="{{ unit }}" {% if product.quantity_unit == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}</select></label>
       <label>Worth buying? <select id="ep-verdict">{% for v in verdicts %}<option {% if v == product.verdict %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
       <label>State <select id="ep-status">{% for st in statuses %}<option {% if st == product.status %}selected{% endif %}>{{ st }}</option>{% endfor %}</select></label>
       <label>Buy at or under <input id="ep-trigger_price" type="number" step="0.01" value="{{ product.trigger_price or '' }}">

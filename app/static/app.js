@@ -1681,9 +1681,9 @@ wire('btn-edit-product', () => document.getElementById('product-dialog').showMod
 wire('ep-save', async () => {
   const productId = Number(location.pathname.split('/').pop());
   const text = ['name', 'model', 'brand', 'category', 'generation', 'verdict', 'status', 'vesa',
-    'fit_notes', 'notes', 'lowest_known_notes', 'lowest_known_date', 'lowest_known_retailer'];
+    'fit_notes', 'notes', 'lowest_known_notes', 'lowest_known_date', 'lowest_known_retailer', 'quantity_unit'];
   const numeric = ['trigger_price', 'excellent_price', 'historical_low_price',
-    'lowest_known_price', 'width_mm', 'height_mm', 'depth_mm', 'weight_kg'];
+    'lowest_known_price', 'width_mm', 'height_mm', 'depth_mm', 'weight_kg', 'quantity'];
   const body = {};
   for (const key of text) {
     const el = document.getElementById(`ep-${key}`);
