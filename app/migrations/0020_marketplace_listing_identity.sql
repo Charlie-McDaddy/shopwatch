@@ -1,6 +1,7 @@
 -- Marketplace offers on one product page may share a URL while belonging to distinct sellers.
 -- Replace the old URL-only uniqueness key without discarding any listing or child records.
 PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
 
 CREATE TABLE listings_rebuilt (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,4 +53,5 @@ FROM listings;
 DROP TABLE listings;
 ALTER TABLE listings_rebuilt RENAME TO listings;
 CREATE INDEX idx_listings_product ON listings(product_id);
+COMMIT;
 PRAGMA foreign_keys = ON;

@@ -800,15 +800,15 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
          whatever it finds under the ordinary LIVE provenance state.
       2. Otherwise (no adapter, or the adapter's fetch failed - bot protection, a
          config with scraping disabled, a dead link), queue a one-off research job
-         scoped to this single URL via the existing research-job pipeline
-         (app/research.py, deploy/research-runner.py), so a human doesn't have to
-         separately go and check it. Its finding still lands through the ordinary
-         POST /api/import path, same as every other research job. A job already
-         running for this product (JobAlreadyRunning) is not an error here - the
-         listing with its URL still stands, and the running job will surface on the
-         product page as usual.
+         scoped to this single URL via the existing research-job pipeline. Marketplace
+         URLs stay manual-only until research results can preserve seller identity;
+         an ambiguous marketplace price must not be attached to a chosen offer. A job
+         already running for this product (JobAlreadyRunning) is not an error here.
     """
-    url = (payload.get("url") or "").strip()
+    raw_url = payload.get("url")
+    if not isinstance(raw_url, str):
+        raise HTTPException(400, "url must be text")
+    url = raw_url.strip()
     if not url:
         raise HTTPException(400, "url is required")
     domain = url_intake.bare_domain(url)
@@ -887,7 +887,7 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                     scraped = not mismatch
 
         research_job = None
-        if not scraped:
+        if not scraped and not url_intake.is_marketplace_url(url):
             try:
                 job_id = research.create_job(
                     conn, product_id, [retailer["id"]], urls={retailer["id"]: url}

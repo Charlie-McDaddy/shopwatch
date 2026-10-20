@@ -20,6 +20,10 @@ def test_marketplace_offers_for_distinct_sellers_remain_separate(client):
     assert a["id"] != b["id"]
     assert a["seller_id"] == "SELLER-1" and b["seller_id"] == "SELLER-2"
     assert a["check_capability"] == b["check_capability"] == "MANUAL"
+    assert first.json()["research_job"] is None and second.json()["research_job"] is None
+    from app.db import connect, db_path
+    with connect(db_path()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM research_jobs").fetchone()[0] == 0
     third = client.post(f"/api/products/{pid}/retailers/from-url", json={
         "url": url, "seller_id": "SELLER-1", "offer_id": "OFFER-2",
     }).json()["listing"]
@@ -37,6 +41,7 @@ def test_marketplace_manual_updates_keep_provenance(client):
     }).json()
     listing = added["listing"]
     assert listing["check_capability"] == "MANUAL"
+    assert added["research_job"] is None
     update = client.patch(f"/api/retailers/{listing['id']}", json={
         "advertised_price": 19.99, "freight": 0,
     })
@@ -110,3 +115,9 @@ def test_adapter_rejects_public_hostname_resolving_to_private_ip(monkeypatch):
     import pytest
     with pytest.raises(base.FetchError, match="unsafe URL or redirect target"):
         adapter.fetch("https://127.0.0.1.nip.io/product")
+
+
+def test_from_url_rejects_non_text_url(client):
+    pid = product_id(client)
+    response = client.post(f"/api/products/{pid}/retailers/from-url", json={"url": []})
+    assert response.status_code == 400
