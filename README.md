@@ -5,7 +5,7 @@
 
 # Shopwatch
 
-[![CI](https://github.com/rodlunt/shopwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/rodlunt/shopwatch/actions/workflows/ci.yml)
+[![CI](https://github.com/Charlie-McDaddy/shopwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Charlie-McDaddy/shopwatch/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12-informational)
 ![Version](https://img.shields.io/badge/version-0.2.0-informational)
@@ -156,7 +156,7 @@ something is still watching for a lot cheaper.
 | | |
 |---|---|
 | Live | https://shop.yourdomain.example (LAN only, `basic_auth`) |
-| Code | GitHub `rodlunt/shopwatch` (private) |
+| Code | GitHub `Charlie-McDaddy/shopwatch` |
 | Deploy | merge to `main`; a green CI run deploys, see **Deployed on opti** |
 | Secrets | `SECURITY.md` names every lane |
 | Tests | `.venv/bin/python -m pytest` and `.venv/bin/python -m ruff check .` |
@@ -859,9 +859,28 @@ ssh root@YOUR-SERVER-IP 'docker compose -f /srv/prod/shopwatch/docker-compose.ym
 
 ## Running without Docker
 
+From the repo root, use Python 3.12 to create an isolated environment and install
+the runtime and development requirements (including pytest and Ruff):
+
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements-dev.txt
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+On Debian or Ubuntu, if environment creation reports that `ensurepip` is unavailable,
+install venv support, then repeat the commands above:
+
+```bash
+sudo apt install python3.12-venv
+```
+
+If you already use `uv`, the equivalent setup is `uv venv --python 3.12 .venv`
+followed by `uv pip install --python .venv/bin/python -r requirements-dev.txt`.
+Activation is optional: the commands here use the environment's Python directly.
+
+Seed the database and start the app:
+
+```bash
 .venv/bin/python -m app.seed
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8477
 ```
@@ -1171,9 +1190,12 @@ or add an entry to `CATEGORY_PROFILES` in `app/seed.py` and re-run `python -m ap
 
 ## Tests
 
+Install the development requirements using the setup above, then run:
+
 ```bash
-.venv/bin/python -m pytest        # 144 tests
+.venv/bin/python -m pytest
 .venv/bin/python -m ruff check .
+.venv/bin/python -m pip check
 ```
 
 They cover the behaviour that is easy to break quietly: delivered-price arithmetic,
