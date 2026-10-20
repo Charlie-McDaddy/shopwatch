@@ -24,7 +24,8 @@ PRODUCT_FIELDS = [
     "mounting_notes", "vesa", "fit_notes", "archived",
 ]
 
-LISTING_FIELDS = provenance.TRACKED_FIELDS + ["product_id", "retailer_id", "active"]
+LISTING_FIELDS = provenance.TRACKED_FIELDS + ["product_id", "retailer_id", "active",
+    "seller_name", "seller_id", "offer_id", "offer_key"]
 
 VERDICTS = ["BUY", "MAYBE", "IGNORE"]
 
@@ -300,6 +301,7 @@ def create_listing(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
     if not payload.get("product_id") or not payload.get("retailer_id"):
         raise ValueError("product_id and retailer_id are required")
     payload.setdefault("condition", "NEW")
+    payload["offer_key"] = payload.get("offer_key") or ""
     payload["created_at"] = payload["updated_at"] = utcnow()
     cols = ", ".join(payload)
     marks = ", ".join("?" for _ in payload)
@@ -308,9 +310,15 @@ def create_listing(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def find_listing(
-    conn: sqlite3.Connection, product_id: int, retailer_id: int, url: str | None = None
+    conn: sqlite3.Connection, product_id: int, retailer_id: int, url: str | None = None,
+    offer_key: str | None = None,
 ) -> sqlite3.Row | None:
     if url:
+        if offer_key is not None:
+            return conn.execute(
+                "SELECT * FROM listings WHERE product_id = ? AND retailer_id = ? AND url = ?"
+                " AND offer_key = ?", (product_id, retailer_id, url, offer_key),
+            ).fetchone()
         row = conn.execute(
             "SELECT * FROM listings WHERE product_id = ? AND retailer_id = ? AND url = ?",
             (product_id, retailer_id, url),
@@ -328,6 +336,18 @@ def enrich_listing(
 ) -> dict[str, Any]:
     """Attach delivered price, classification, provenance and verification to a listing row."""
     listing = dict(row)
+    listing["provenance"] = provenance.provenance_map(conn, listing["id"])
+    stale = any(value["state"] == provenance.STALE
+                for value in listing["provenance"].values())
+    from . import url_intake
+    domain = url_intake.bare_domain(listing.get("url") or "")
+    adapter_cls = url_intake.adapter_for_domain(domain) if domain else None
+    automatic = bool(adapter_cls and adapter_cls.slug == listing.get("retailer_adapter"))
+    listing["check_capability"] = "AUTOMATIC" if automatic else "MANUAL"
+    listing["check_status"] = (
+        "BLOCKED" if listing.get("check_error") else
+        "STALE" if stale else listing["check_capability"]
+    )
     delivered = pricing.delivered_price(
         listing["advertised_price"],
         listing["freight"],
@@ -343,7 +363,6 @@ def enrich_listing(
     listing["diff_from_low"] = pricing.difference_from_low(
         delivered, product.get("lowest_known_price")
     )
-    listing["provenance"] = provenance.provenance_map(conn, listing["id"])
     listing["verification"] = provenance.verification_map(conn, listing["id"])
     listing["manual_fields"] = sorted(
         f for f, p in listing["provenance"].items() if p["manual_locked"]

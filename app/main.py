@@ -813,7 +813,11 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
         raise HTTPException(400, "url is required")
     domain = url_intake.bare_domain(url)
     if not domain:
-        raise HTTPException(400, "url must be a full http:// or https:// address")
+        raise HTTPException(400, "url must be a public http:// or https:// address")
+    try:
+        offer_identity = url_intake.marketplace_identity(url, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     with session() as conn:
         product = store.get_product(conn, product_id)
@@ -836,22 +840,40 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                 " (Retailers page) if you want to track it again."
             )
 
-        existing = store.find_listing(conn, product_id, retailer["id"], url)
+        offer_key = offer_identity["offer_key"] if url_intake.is_marketplace_url(url) else None
+        existing = store.find_listing(conn, product_id, retailer["id"], url, offer_key=offer_key)
         if existing is None:
-            listing_id = store.create_listing(
-                conn, {"product_id": product_id, "retailer_id": retailer["id"], "url": url}
-            )
+            listing_id = store.create_listing(conn, {
+                "product_id": product_id, "retailer_id": retailer["id"], "url": url,
+                **offer_identity,
+            })
         else:
             listing_id = existing["id"]
 
         scraped = False
+        check_error = None
         if adapter_cls is not None:
             try:
                 observation = adapter_cls().check(url, expected_model=product["model"])
-            except retailers.FetchError:
+            except retailers.FetchError as exc:
                 observation = None
+                check_error = str(exc)
+            conn.execute(
+                "UPDATE listings SET check_error = ?, updated_at = ? WHERE id = ?",
+                (check_error, utcnow(), listing_id),
+            )
             if observation is not None:
-                values = observation.to_values()
+                mismatch = next((w for w in observation.warnings if "model mismatch" in w), None)
+                if mismatch:
+                    conn.execute(
+                        "UPDATE listings SET ruled_out = 1, ruled_out_reason = ?,"
+                        " ruled_out_at = ?, updated_at = ? WHERE id = ?",
+                        (mismatch, utcnow(), utcnow(), listing_id),
+                    )
+                    provenance.set_verification(
+                        conn, listing_id, "model", provenance.FLAGGED, mismatch
+                    )
+                values = {} if mismatch else observation.to_values()
                 if values:
                     provenance.apply_values(
                         conn, listing_id, values, state=provenance.LIVE, source=adapter_cls.slug
@@ -861,15 +883,8 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                         (utcnow(), utcnow(), listing_id),
                     )
                     provenance.sync_verification_from_provenance(conn, listing_id)
-                    mismatch = next(
-                        (w for w in observation.warnings if "model mismatch" in w), None
-                    )
-                    if mismatch:
-                        provenance.set_verification(
-                            conn, listing_id, "model", provenance.FLAGGED, mismatch
-                        )
                     store.record_observation(conn, listing_id, source=adapter_cls.slug)
-                    scraped = True
+                    scraped = not mismatch
 
         research_job = None
         if not scraped:

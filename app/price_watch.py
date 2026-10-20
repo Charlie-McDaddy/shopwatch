@@ -67,8 +67,11 @@ def check_listing(
 ) -> str:
     """Check one listing. Returns 'ok', 'unresolved', 'skipped' or 'error'."""
     adapter = retailers.get_adapter(listing["retailer_adapter"])
-    if adapter is None:
-        _record(conn, run_id, listing["id"], "skipped", "no adapter for this retailer")
+    from . import url_intake
+    domain = url_intake.bare_domain(listing["url"] or "")
+    scoped_adapter = url_intake.adapter_for_domain(domain) if domain else None
+    if adapter is None or scoped_adapter is None or scoped_adapter.slug != adapter.slug:
+        _record(conn, run_id, listing["id"], "skipped", "no supported automatic check for this URL")
         return "skipped"
     if not listing["url"]:
         _record(conn, run_id, listing["id"], "skipped", "listing has no URL")
@@ -80,12 +83,17 @@ def check_listing(
         # Deliberately leaves every stored value alone. The previous reading is still the
         # best information available; an error is not evidence that the price changed.
         _record(conn, run_id, listing["id"], "error", str(exc))
+        conn.execute("UPDATE listings SET check_error = ? WHERE id = ?", (str(exc), listing["id"]))
         log.warning("%s: %s", adapter.name, exc)
         return "error"
     except Exception as exc:  # an adapter bug must not abort the whole run
         _record(
             conn, run_id, listing["id"], "error",
             f"adapter crashed: {type(exc).__name__}: {exc}",
+        )
+        conn.execute(
+            "UPDATE listings SET check_error = ? WHERE id = ?",
+            (f"adapter crashed: {type(exc).__name__}: {exc}", listing["id"]),
         )
         log.exception("adapter %s crashed", adapter.slug)
         return "error"
@@ -95,7 +103,7 @@ def check_listing(
         conn, listing["id"], values, state=provenance.LIVE, source=adapter.slug
     )
     conn.execute(
-        "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
+        "UPDATE listings SET last_checked_at = ?, updated_at = ?, check_error = NULL WHERE id = ?",
         (utcnow(), utcnow(), listing["id"]),
     )
     provenance.sync_verification_from_provenance(conn, listing["id"])

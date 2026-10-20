@@ -13,7 +13,13 @@ from app.retailers.base import FetchError, Observation
 def wired(seeded, monkeypatch):
     """Seeded board with URLs on every listing, so adapters are actually attempted."""
     with connect(seeded) as conn:
-        conn.execute("UPDATE listings SET url = 'https://example.invalid/product'")
+        rows = conn.execute(
+            "SELECT l.id, r.adapter FROM listings l JOIN retailers r ON r.id = l.retailer_id"
+        ).fetchall()
+        for row in rows:
+            adapter = retailers.get_adapter(row["adapter"])
+            conn.execute("UPDATE listings SET url = ? WHERE id = ?",
+                         (adapter.homepage + "/product", row["id"]))
         conn.commit()
     return seeded
 

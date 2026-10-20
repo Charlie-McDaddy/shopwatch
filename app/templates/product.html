@@ -233,14 +233,16 @@
   <div class="body">
     <p class="small muted" style="margin:0 0 10px;max-width:60ch">
       Found this somewhere and just have the page address? Paste it below. The
-      retailer is worked out from the URL - if it's one shopwatch already knows how to
-      scrape, the price comes back straight away; otherwise a one-off check is queued
-      for it.
+      retailer is worked out from the URL. Supported retailer pages may be checked
+      automatically; marketplace and other unsupported links need manual price updates.
     </p>
     <div class="form-grid">
       <label class="wide">Listing URL
         <input id="ul-url" placeholder="https://www.example.com.au/the-product" autocomplete="off">
       </label>
+      <label>Marketplace seller <input id="ul-seller-name" placeholder="Seller name"></label>
+      <label>Seller ID <input id="ul-seller-id" placeholder="Optional seller ID"></label>
+      <label class="wide">Offer ID <input id="ul-offer-id" placeholder="Optional offer ID"></label>
     </div>
   </div>
   <footer><button data-close>Cancel</button><button class="primary" id="ul-save">Add</button></footer>

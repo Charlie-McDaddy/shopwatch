@@ -127,6 +127,7 @@ def test_an_adapter_fetch_failure_falls_back_to_a_research_job(client, monkeypat
     body = response.json()
     assert body["scraped"] is False
     assert body["listing"]["advertised_price"] == before["advertised_price"]
+    assert body["listing"]["check_status"] == "BLOCKED"
     assert body["research_job"] is not None
 
 

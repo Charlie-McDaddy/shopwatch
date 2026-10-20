@@ -242,3 +242,33 @@ def test_import_stores_hostile_text_verbatim_so_the_view_layer_must_escape(seede
         assert report["retailer"] == payload, "stored exactly as given, not silently rewritten"
         prov = provenance.provenance_map(conn, report["listing_id"])["advertised_price"]
         assert prov["source"] == "<script>alert(2)</script>"
+
+
+def test_marketplace_offers_survive_snapshot_round_trip(seeded, tmp_path, monkeypatch):
+    from app.db import migrate
+
+    with connect(seeded) as conn:
+        for seller, price in (("SELLER-A", 20), ("SELLER-B", 22)):
+            ingest.import_finding(conn, {
+                "model": "HW-Q930H/XY", "retailer": "Amazon.com.au",
+                "source_url": "https://www.amazon.com.au/dp/B0TEST123",
+                "seller_id": seller, "seller_name": seller, "price": price,
+            })
+        snapshot = ingest.export_all(conn)
+        marketplace_rows = [row for row in snapshot["listings"] if row.get("seller_id")]
+        assert {row["seller_id"] for row in marketplace_rows} == {"SELLER-A", "SELLER-B"}
+
+    target = tmp_path / "marketplace-restored.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(target))
+    migrate(target)
+    with connect(target) as conn:
+        ingest.import_snapshot(conn, snapshot)
+        conn.commit()
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        rows = conn.execute(
+            "SELECT seller_id, advertised_price FROM listings WHERE product_id = ?"
+            " AND seller_id IS NOT NULL ORDER BY seller_id", (product["id"],)
+        ).fetchall()
+        assert [(row["seller_id"], row["advertised_price"]) for row in rows] == [
+            ("SELLER-A", 20.0), ("SELLER-B", 22.0),
+        ]

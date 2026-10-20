@@ -1089,7 +1089,7 @@ wire('al-save', async () => {
  */
 
 wire('btn-add-listing-url', () => {
-  document.getElementById('ul-url').value = '';
+  for (const id of ['ul-url', 'ul-seller-name', 'ul-seller-id', 'ul-offer-id']) document.getElementById(id).value = '';
   document.getElementById('url-listing-dialog').showModal();
 });
 wire('ul-save', async () => {
@@ -1101,7 +1101,11 @@ wire('ul-save', async () => {
   btn.disabled = true;
   try {
     const result = await api(`/api/products/${productId}/retailers/from-url`, {
-      method: 'POST', body: { url },
+      method: 'POST', body: {
+        url, seller_name: document.getElementById('ul-seller-name').value.trim() || null,
+        seller_id: document.getElementById('ul-seller-id').value.trim() || null,
+        offer_id: document.getElementById('ul-offer-id').value.trim() || null,
+      },
     });
     const message = result.scraped
       ? `Listing added for ${result.retailer.name} - price found straight away.`

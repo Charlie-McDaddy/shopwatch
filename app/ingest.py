@@ -16,7 +16,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from . import provenance, store
+from . import provenance, store, url_intake
 from .db import utcnow
 
 # Finding keys that map onto listing fields.
@@ -84,13 +84,19 @@ def import_finding(
 
     retailer = store.ensure_retailer(conn, retailer_name)
     url = finding.get("source_url") or finding.get("url")
-    listing = store.find_listing(conn, product["id"], retailer["id"], url)
+    identity = url_intake.marketplace_identity(url, finding) if url else {
+        "seller_name": None, "seller_id": None, "offer_id": None, "offer_key": ""
+    }
+    offer_key = identity["offer_key"] if url and url_intake.is_marketplace_url(url) else None
+    listing = store.find_listing(
+        conn, product["id"], retailer["id"], url, offer_key=offer_key
+    )
     created = False
     if listing is None:
-        listing_id = store.create_listing(
-            conn,
-            {"product_id": product["id"], "retailer_id": retailer["id"], "url": url},
-        )
+        listing_id = store.create_listing(conn, {
+            "product_id": product["id"], "retailer_id": retailer["id"], "url": url,
+            **identity,
+        })
         created = True
     else:
         listing_id = listing["id"]
@@ -258,14 +264,15 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
         if pid is None or rid is None:
             report["errors"].append(f"listing {snap.get('id')}: unknown product or retailer")
             continue
-        existing = store.find_listing(conn, pid, rid, snap.get("url"))
-        listing_id = (
-            existing["id"]
-            if existing
-            else store.create_listing(
-                conn, {"product_id": pid, "retailer_id": rid, "url": snap.get("url")}
-            )
-        )
+        offer_key = snap.get("offer_key", "")
+        snap_url = snap.get("url")
+        lookup_key = offer_key if snap_url and url_intake.is_marketplace_url(snap_url) else None
+        existing = store.find_listing(conn, pid, rid, snap_url, offer_key=lookup_key)
+        listing_id = existing["id"] if existing else store.create_listing(conn, {
+            "product_id": pid, "retailer_id": rid, "url": snap.get("url"),
+            **{key: snap.get(key) for key in ("seller_name", "seller_id", "offer_id")},
+            "offer_key": offer_key,
+        })
         listing_ids[snap["id"]] = listing_id
 
         for field in provenance.TRACKED_FIELDS:
