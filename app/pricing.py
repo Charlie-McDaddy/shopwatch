@@ -173,18 +173,25 @@ def difference_from_low(delivered: Delivered | float | None, lowest_known: Any) 
     return round(value - low, 2)
 
 
+def listing_is_comparable(listing: Mapping[str, Any]) -> bool:
+    """Whether a listing is eligible to affect comparisons and alerts."""
+    verification = listing.get("verification") or {}
+    model = verification.get("model") or {}
+    return not listing.get("ruled_out") and model.get("status") != "FLAGGED"
+
+
 def best_listing(rows: list[Mapping[str, Any]], penalty: float = 60.0) -> Mapping[str, Any] | None:
     """The current best buy: cheapest confirmed delivered price, unresolved listings penalised.
 
-    A ruled-out listing is never the answer, however cheap. It stays on the board and on
-    the axis, because a decision you can see is worth more than one you have to
-    remember, but it cannot be nominated: the board was headlining Crowdshop's $869
+    A ruled-out listing or one with a flagged model is never the answer, however cheap.
+    It stays visible on the board and axis so the operator can review it, but it cannot
+    be nominated: the board was headlining Crowdshop's $869
     hours after that price had been rejected, because cheapest and best were the same
     question here and they are not.
     """
     priced = [
         r for r in rows
-        if r.get("delivered") and r["delivered"].known and not r.get("ruled_out")
+        if r.get("delivered") and r["delivered"].known and listing_is_comparable(r)
     ]
     if not priced:
         return None
@@ -256,7 +263,7 @@ def threshold_scale(
             "classification": listing.get("classification"),
             # Still plotted, deliberately. Ruling something out is a decision that can
             # be revisited, and it is easier to revisit one you can see sitting there.
-            "ruled_out": bool(listing.get("ruled_out")),
+            "ruled_out": not listing_is_comparable(listing),
             # Set by store.product_view() (issue #100), not computed here - this
             # module stays about positions, not presentation. Copied through rather
             # than dropped so the dot and its listing row below share one value.

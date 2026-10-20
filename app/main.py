@@ -866,8 +866,8 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                 mismatch = next((w for w in observation.warnings if "model mismatch" in w), None)
                 if mismatch:
                     conn.execute(
-                        "UPDATE listings SET ruled_out = 1, ruled_out_reason = ?,"
-                        " ruled_out_at = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE listings SET check_error = ?, last_checked_at = ?,"
+                        " updated_at = ? WHERE id = ?",
                         (mismatch, utcnow(), utcnow(), listing_id),
                     )
                     provenance.set_verification(

@@ -97,9 +97,10 @@ def test_adapter_model_mismatch_is_held_out_and_does_not_apply_wrong_price(clien
     })
     listing = response.json()["listing"]
     assert response.status_code == 201
-    assert listing["ruled_out"] == 1
+    assert listing["ruled_out"] == 0
     assert listing["advertised_price"] == before["advertised_price"]
     assert listing["verification"]["model"]["status"] == provenance.FLAGGED
+    assert listing["check_status"] == "BLOCKED"
 
 
 def test_adapter_rejects_public_hostname_resolving_to_private_ip(monkeypatch):

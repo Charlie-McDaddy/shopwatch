@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import price_watch, provenance, retailers, store
+from app import alerts, price_watch, provenance, retailers, store
 from app.db import connect
 from app.retailers.base import FetchError, Observation
 
@@ -245,3 +245,91 @@ def test_purchase_keeps_grouped_candidate_listings_in_the_watch(wired, monkeypat
 
     assert summary["checked"] >= 2
     assert {"GROUP-A", "GROUP-B"} <= set(checked_models)
+
+
+def test_model_mismatch_does_not_update_price_history_or_alert(wired, monkeypatch):
+    with connect(wired) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        listing = conn.execute(
+            "SELECT l.* FROM listings l JOIN retailers r ON r.id = l.retailer_id"
+            " WHERE l.product_id = ? AND r.adapter = 'jb_hifi'", (product["id"],)
+        ).fetchone()
+        conn.execute(
+            "UPDATE listings SET active = 0 WHERE product_id = ? AND id != ?",
+            (product["id"], listing["id"]),
+        )
+        provenance.set_field(conn, listing["id"], "freight", 0, state=provenance.MANUAL)
+        conn.execute(
+            "INSERT INTO alert_rules (product_id, name, max_delivered, require_complete,"
+            " require_resolved, min_change) VALUES (?, 'Mismatch guard', 2000, 0, 1, 1)",
+            (product["id"],),
+        )
+        store.record_observation(conn, listing["id"], source="before-mismatch")
+        conn.commit()
+        original_price = listing["advertised_price"]
+        original_low = conn.execute(
+            "SELECT lowest_known_price FROM products WHERE id = ?", (product["id"],)
+        ).fetchone()[0]
+        original_history_count = conn.execute(
+            "SELECT COUNT(*) FROM price_history WHERE listing_id = ?", (listing["id"],)
+        ).fetchone()[0]
+        before = store.product_view(conn, product["id"])
+        assert before["best_listing"]["id"] == listing["id"]
+        assert alerts.evaluate_product(conn, before)
+
+    stub_adapters(monkeypatch, lambda slug: Observation(
+        advertised_price=1.0, model_on_page="HW-Q990H/XY", model_on_page_key="mpn",
+        warnings=["model mismatch: page shows HW-Q990H/XY, expected HW-Q930H/XY"],
+    ))
+    price_watch.run(product_id=product["id"], send_alerts=False)
+
+    with connect(wired) as conn:
+        saved = conn.execute("SELECT * FROM listings WHERE id = ?", (listing["id"],)).fetchone()
+        assert saved["advertised_price"] == original_price
+        assert saved["model_on_page"] != "HW-Q990H/XY"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM price_history WHERE listing_id = ?", (listing["id"],)
+        ).fetchone()[0] == original_history_count
+        assert conn.execute(
+            "SELECT lowest_known_price FROM products WHERE id = ?", (product["id"],)
+        ).fetchone()[0] == original_low
+        view = store.product_view(conn, product["id"])
+        assert view["best_listing"] is None
+        assert alerts.evaluate_product(conn, view) == []
+        assert provenance.verification_map(conn, listing["id"])["model"]["status"] == provenance.FLAGGED
+
+    stub_adapters(monkeypatch, lambda slug: Observation(
+        advertised_price=original_price + 5, model_on_page="HW-Q930H/XY", model_on_page_key="mpn",
+    ))
+    price_watch.run(product_id=product["id"], send_alerts=False)
+    with connect(wired) as conn:
+        saved = conn.execute("SELECT * FROM listings WHERE id = ?", (listing["id"],)).fetchone()
+        assert saved["advertised_price"] == original_price + 5
+        assert provenance.verification_map(conn, listing["id"])["model"]["status"] != provenance.FLAGGED
+        assert store.product_view(conn, product["id"])["best_listing"]["id"] == listing["id"]
+
+
+def test_a_correct_model_refresh_does_not_clear_a_manual_rule_out(wired, monkeypatch):
+    with connect(wired) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        row = conn.execute(
+            "SELECT l.id FROM listings l JOIN retailers r ON r.id = l.retailer_id"
+            " WHERE l.product_id = ? AND r.adapter = 'jb_hifi'", (product["id"],)
+        ).fetchone()
+        listing_id = row["id"]
+        conn.execute("UPDATE listings SET ruled_out = 1 WHERE id = ?", (listing_id,))
+        provenance.set_verification(
+            conn, listing_id, "model", provenance.FLAGGED, "prior model mismatch"
+        )
+        conn.commit()
+
+    stub_adapters(monkeypatch, lambda slug: Observation(
+        advertised_price=1700.0, model_on_page="HW-Q930H/XY", model_on_page_key="mpn",
+    ))
+    price_watch.run(product_id=product["id"], send_alerts=False)
+
+    with connect(wired) as conn:
+        saved = conn.execute("SELECT ruled_out FROM listings WHERE id = ?", (listing_id,)).fetchone()
+        assert saved["ruled_out"] == 1
+        assert provenance.verification_map(conn, listing_id)["model"]["status"] != provenance.FLAGGED
+        assert store.product_view(conn, product["id"])["best_listing"]["id"] != listing_id

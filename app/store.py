@@ -701,13 +701,14 @@ def group_view(
                 "retailer_name": listing["retailer_name"],
                 "value": listing["delivered_price"],
                 "resolved": bool(listing["delivered_resolved"]),
-                "ruled_out": bool(listing.get("ruled_out")),
+                "ruled_out": not pricing.listing_is_comparable(listing),
+                "verification": listing.get("verification"),
                 "candidate_color": member["candidate_color"],
             })
     group["scale"] = pricing.merge_price_points(points)
     # Same rule as a single product's best_listing: a ruled-out candidate never wins,
     # however cheap.
-    contenders = [p for p in points if not p["ruled_out"]]
+    contenders = [p for p in points if pricing.listing_is_comparable(p)]
     group["best"] = min(contenders, key=lambda p: p["value"]) if contenders else None
     return group
 
