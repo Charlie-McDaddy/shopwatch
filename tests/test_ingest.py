@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from app import ingest, provenance, store

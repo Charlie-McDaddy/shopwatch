@@ -185,13 +185,13 @@ app/
   alerts.py          rule evaluation, ntfy / webhook / console delivery
   seed.py            category profiles, retailers, HW-Q930H/XY board
   research.py        the wizard's research-job lifecycle (deploy/research-runner.py claims)
-  llm_jobs.py         the wizard's model-suggestion job lifecycle (tools/llm-helper.py claims)
+  llm_jobs.py         the wizard's model-suggestion jobs (host research runner claims)
   retailers/
     base.py          adapter framework, JSON-LD reader, Observation
     crowdshop.py  harvey_norman.py  jb_hifi.py  the_good_guys.py  appliance_central.py
   templates/  static/
 tools/
-  llm-helper.py      run on YOUR OWN machine - see "Suggesting a model number" below
+  llm-helper.py      shared research prompts/parsers; optional standalone CLI helper
   llm-helper-bundle/ README.txt + double-click launchers zipped by GET /tools/llm-helper.zip
 deploy/
   research-runner.py opti-only host script - see "The product wizard's research step"

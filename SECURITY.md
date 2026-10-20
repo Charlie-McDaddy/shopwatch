@@ -41,14 +41,18 @@ It holds no payment details, no card numbers and no retailer account credentials
   `/srv/prod/career/runner.env` Claude Code OAuth token as the mail watcher, for the
   same reason: nothing new to store or rotate. It runs as its own host-level script,
   polled by `shopwatch-research-runner.timer` every 2 minutes, never inside the
-  `shopwatch` container - the container this API serves from never holds this
-  credential and never gains new outbound egress.
+  `shopwatch` container. The web container never holds this CLI credential.
 
-- **The wizard's model-suggestion helper** (`tools/llm-helper.py`) holds no credential
-  this deployment owns at all, on opti or anywhere else - not even the shared
-  `runner.env` token the two lanes above reuse. It runs on whoever's own machine has a
-  Claude Code or Codex CLI login, polling `POST /api/llm-jobs/claim` and answering with
-  that person's own subscription. See the README's "Suggesting a model number" section.
+- **The wizard's model suggestions and retailer discovery** use that same host research
+  runner and subscription OAuth token. Server-side Claude invocations disable API-key
+  and cloud-provider billing overrides and use an isolated CLI configuration. The
+  optional standalone helper can still use its operator's own CLI login, but normal
+  GUI use does not require it. See the README's "Product and retailer research" section.
+
+- **Wayback history** needs no credential. The web app makes bounded HTTPS requests to
+  fixed `web.archive.org` endpoints, rejects redirects and private destinations, and
+  treats captured prices as sourced advertised-price evidence rather than confirmed
+  delivered prices. Retailer fetching likewise validates each destination and redirect.
 
 ## If this is an active incident
 
