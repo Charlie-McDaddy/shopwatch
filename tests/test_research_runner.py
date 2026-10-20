@@ -5,6 +5,7 @@ why this script exists and where it runs (never inside the shopwatch container).
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -15,6 +16,11 @@ _SPEC = importlib.util.spec_from_file_location("research_runner", _PATH)
 research_runner = importlib.util.module_from_spec(_SPEC)
 sys.modules["research_runner"] = research_runner
 _SPEC.loader.exec_module(research_runner)
+
+
+@pytest.fixture(autouse=True)
+def claude_subscription_token(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-subscription-token")
 
 
 def test_a_clean_json_reply_with_a_price_parses(monkeypatch):
@@ -394,7 +400,121 @@ def test_research_historical_low_reports_a_non_zero_exit_as_failed(monkeypatch):
     with pytest.raises(research_runner.RunnerError) as exc_info:
         research_runner.research_historical_low("http://x", "claude", "Some Product", "SKU-1")
     assert exc_info.value.status == "FAILED"
-    assert "dead token" in exc_info.value.note
+    assert "dead token" not in exc_info.value.note
+    assert "reconnect" in exc_info.value.note.lower()
+
+
+def test_missing_subscription_token_fails_without_running_the_cli(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    invoked = False
+
+    def fake_run(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("CLI must not run without the subscription token")
+
+    monkeypatch.setattr(research_runner.subprocess, "run", fake_run)
+    with pytest.raises(research_runner.SubscriptionAccessUnavailable, match="OAuth token"):
+        research_runner._run_subscription_claude(["claude", "-p"], "query", 5)
+    assert not invoked
+
+
+def test_retailer_research_does_not_return_cli_stderr_to_the_gui(monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "session expired; secret=do-not-expose"
+
+    monkeypatch.setattr(research_runner.subprocess, "run", lambda *a, **k: FakeProc())
+    with pytest.raises(research_runner.RunnerError) as exc_info:
+        research_runner.research_one_retailer(
+            "http://x", "claude", "Some Product", "SKU-1", "Some Retailer", None
+        )
+    assert "do-not-expose" not in exc_info.value.note
+    assert "reconnect" in exc_info.value.note.lower()
+
+
+def test_poll_llm_claims_the_gui_job_runs_search_and_returns_sourced_candidates(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    invoked = {}
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                if url.endswith("/claim"):
+                    return {"id": 42, "kind": "model_suggestion", "query": "robot mower"}
+                return {"id": 42, "status": "DONE"}
+        return Response()
+
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout='{"candidates":[{"model":"RM-1","label":"Mower","source":"https://shop.example/rm-1"}],"note":null}',
+        stderr="",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+    monkeypatch.setattr(research_runner.requests, "post", fake_post)
+    def fake_run(args, **kwargs):
+        invoked["args"] = args
+        invoked["prompt"] = kwargs["input"]
+        invoked["env"] = kwargs["env"]
+        invoked["cwd"] = kwargs["cwd"]
+        return proc
+    monkeypatch.setattr(research_runner.subprocess, "run", fake_run)
+
+    assert research_runner.poll_llm_once("http://shopwatch", "claude") is True
+    assert calls[0][0] == "http://shopwatch/api/llm-jobs/claim"
+    assert calls[1][0] == "http://shopwatch/api/llm-jobs/42/complete"
+    assert calls[1][1]["json"]["status"] == "DONE"
+    result = json.loads(calls[1][1]["json"]["result"])
+    assert result["candidates"][0]["source"] == "https://shop.example/rm-1"
+    assert invoked["args"][invoked["args"].index("--allowedTools") + 1] == "WebSearch"
+    assert "WebSearch" in invoked["prompt"]
+    assert invoked["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-token"
+    assert "ANTHROPIC_API_KEY" not in invoked["env"]
+    assert invoked["cwd"] == invoked["env"]["CLAUDE_CONFIG_DIR"]
+    settings_arg = invoked["args"][invoked["args"].index("--settings") + 1]
+    assert '"ANTHROPIC_API_KEY": ""' in settings_arg
+
+
+def test_poll_llm_also_handles_gui_retailer_discovery_without_the_desktop_helper(monkeypatch):
+    from types import SimpleNamespace
+
+    posted = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            if len(posted) == 1:
+                return {"id": 43, "kind": "retailer_discovery", "query": "find AU sellers"}
+            return {"id": 43, "status": "DONE"}
+
+    def fake_post(url, **kwargs):
+        posted.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(research_runner.requests, "post", fake_post)
+    monkeypatch.setattr(
+        research_runner.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0,
+            stdout='{"retailers":[{"name":"Store","homepage":"https://store.example"}],"note":null}',
+            stderr="",
+        ),
+    )
+
+    assert research_runner.poll_llm_once("http://shopwatch", "claude") is True
+    assert json.loads(posted[1][1]["json"]["result"])["retailers"] == [
+        {"name": "Store", "homepage": "https://store.example"}
+    ]
 
 
 def test_research_historical_low_returns_the_parsed_finding_on_success(monkeypatch):

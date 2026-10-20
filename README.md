@@ -542,6 +542,14 @@ container never holds the Claude Code OAuth token and never gains new outbound e
 only the host script does, reusing the same `/srv/prod/career/runner.env` credential
 mailwatch already reuses. Nothing new to store or rotate.
 
+The GUI uses the host's existing Claude Code CLI session; it does not use an Anthropic
+API key or paid OpenRouter fallback. A Claude subscription alone does not prove that
+this host's CLI session is authorised for unattended use or web search. Before relying
+on research, the host operator must verify the signed-in CLI and its WebSearch access
+on that host. If access expires, the job reports that the host session needs reconnecting
+and can be retried after the operator signs the CLI in again. Direct retailer checks
+continue independently of this research queue.
+
 **At most one active job per product.** A database constraint (not just application
 logic) rejects a second `QUEUED` or `RUNNING` job for a product with a 409, so a
 double-click or a retried request can't spend the shared research quota twice. A
@@ -688,84 +696,30 @@ via `DELETE /api/retailers/{listing_id}`) - "reactivate by hand" means adding th
 through the ordinary "Add retailer manually" or "Add from a URL" flow, which creates a fresh
 listing.
 
-## Suggesting a model number ("Set up your LLM")
+## Product and retailer research
 
-**TL;DR - 5 minutes, no coding:**
+Model suggestions, retailer discovery and price research all start in the GUI and run
+through the host research runner. Model suggestions and retailer discovery use the
+host's existing Claude Code CLI session with WebSearch; retailer discovery can also use
+the self-hosted Firecrawl service. Retailer price research uses WebSearch/WebFetch. The
+app does not call a paid AI/search API or fall back to paid OpenRouter credits.
 
-1. Click **"Set up your LLM"** at the top of the page, then **"Download the helper"**.
-2. Unzip it.
-3. Double-click the one file matching your computer and AI tool (a plain-English
-   `README.txt` is in the zip too if you're not sure which):
+For Claude jobs, the runner requires `CLAUDE_CODE_OAUTH_TOKEN`, clears API-key and
+cloud-provider routing variables, and starts Claude Code with an isolated configuration
+and those billing overrides disabled. It fails the job when the subscription token is
+missing instead of falling back to API credentials.
 
-   |            | Claude Code               | Codex                     |
-   |------------|----------------------------|----------------------------|
-   | Windows    | `run-claude-windows.bat`   | `run-codex-windows.bat`   |
-   | Mac        | `run-claude-mac.command`   | `run-codex-mac.command`   |
-   | Linux      | `run-claude-linux.sh`      | `run-codex-linux.sh`      |
+Before relying on unattended research, verify that `CLAUDE_CODE_OAUTH_TOKEN` is
+configured in the host runner environment without printing its value, then submit one
+GUI search and confirm that it completes with source links. The token's presence alone
+does not prove that it remains valid or that the account permits unattended WebSearch.
 
-4. A window opens and asks for your shopwatch username and password (the same ones
-   you already use to open this site). Enter them and leave that window open.
-
-That's it. Back in the wizard, type what you're watching and click "Suggest models" -
-candidates appear as clickable chips a few seconds later. You'll need Claude Code or
-Codex already installed and signed in on that computer, but nothing else: no API key,
-no `pip install`, nothing this server stores or bills for.
-
-<details>
-<summary>How it works, the command-line option, and why it's built this way</summary>
-
-The wizard's "Suggest models" button turns a rough description ("Dreame RoboMower")
-into a short list of real candidate model numbers, using **your own** Claude Code or
-Codex CLI login - no API key, nothing this server holds or bills for.
-
-**The zip** (`GET /tools/llm-helper.zip`) contains `llm-helper.py`, a plain-English
-`README.txt`, and a double-click launcher per OS x backend combination, each already
-pointed at this shopwatch instance - no command to type or edit.
-
-**Setup, from the command line**, if you'd rather:
-
-1. Download `tools/llm-helper.py` (the running app serves it directly at
-   `/tools/llm-helper.py`, or grab it from this repo).
-2. Run it:
-   ```
-   python3 llm-helper.py --url https://your-shopwatch-url --backend claude
-   ```
-   (`--backend codex` for Codex.) No `pip install` needed - the script is pure standard
-   library. Enter your shopwatch username and password when prompted.
-3. Leave it running. Back in the wizard, type what you're watching and click "Suggest
-   models" - it queues a job, the helper picks it up within a couple of seconds, and
-   candidates appear as clickable chips that fill "Exact model" for you to verify.
-
-**Why this shape, not a container-side API key:** every other credentialed feature in
-this app (mailwatch, the research runner above) deliberately keeps the credential off
-the web container entirely - a compromised container has nothing worth stealing. This
-extends that same principle one step further: the credential does not even belong to
-*this* server. It belongs to whoever's machine is running the helper, using whatever CLI
-subscription they already pay for. Nothing to configure server-side, nothing to rotate.
-
-**Same job-queue shape as the research runner above** (`app/llm_jobs.py` mirrors
-`app/research.py` closely): `POST /api/llm-jobs` queues a job and returns immediately,
-`POST /api/llm-jobs/claim` is how a helper claims the next one, `POST
-/api/llm-jobs/{id}/complete` reports the answer back, and a job stuck `RUNNING` for
-longer than two minutes (`llm_jobs.JOB_CEILING_SECONDS`) is judged stale and failed
-automatically - a killed terminal must not leave the wizard waiting forever.
-
-**A candidate is a suggestion to verify, never applied automatically.** "Exact model" is
-used to match future price imports, so a wrong-but-plausible model number would silently
-corrupt matching later. The prompt asks the model to return zero candidates rather than
-guess when it isn't genuinely confident, and every response is shown with a caveat note
-about confidence or recency - clicking a chip only fills the text field, exactly as if
-you had typed it yourself.
-
-**The URL that goes into the zip is validated, not trusted.** `GET
-/tools/llm-helper.zip?url=...` writes that value as plain data into the zip
-(`shopwatch-url.txt`, which each launcher reads at runtime) rather than ever splicing
-it into a script's own text, and rejects anything that isn't exactly `https?://host
-[:port]` before it gets that far - a download link is something someone could be
-tricked into clicking, so the value behind `url` gets no more trust than any other
-request parameter.
-
-</details>
+The web container never receives the CLI credential. A subscription alone does not
+prove that the host session has unattended access or WebSearch enabled, so the host
+operator must verify that access before relying on research. A failed or expired session
+appears as a failed job with a reconnect-and-retry instruction; independent direct
+retailer checks continue. Model candidates include source links and remain suggestions:
+clicking one only fills the model field for the user to verify.
 
 ## Deployed on opti
 

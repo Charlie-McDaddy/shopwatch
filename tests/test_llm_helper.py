@@ -41,6 +41,25 @@ def test_zero_candidates_is_valid_not_an_error():
     assert result["candidates"] == []
 
 
+def test_web_reply_requires_candidates_to_have_a_full_http_source():
+    reply = ('{"candidates": ['
+             '{"model":"GOOD-1","source":"https://shop.example/item"},'
+             '{"model":"BAD-1","source":"javascript:alert(1)"},'
+             '{"model":"NO-HOST","source":"https:"}],"note":null}')
+    result = llm_helper.parse_web_reply(reply)
+    assert result["candidates"] == [
+        {"model": "GOOD-1", "label": "GOOD-1", "source": "https://shop.example/item"}
+    ]
+
+
+def test_web_reply_reports_when_every_candidate_lacks_a_source():
+    result = llm_helper.parse_web_reply(
+        '{"candidates":[{"model":"UNSOURCED-1"}],"note":null}'
+    )
+    assert result["candidates"] == []
+    assert "source" in result["note"].lower()
+
+
 def test_a_candidate_missing_a_model_is_dropped_not_kept_blank():
     reply = '{"candidates": [{"model": "", "label": "no idea"}, {"model": "REAL-1"}], "note": null}'
     result = llm_helper.parse_reply(reply)
@@ -147,6 +166,16 @@ def test_a_retailer_with_no_homepage_gets_null_not_a_crash():
     reply = '{"retailers": [{"name": "Bunnings"}], "note": null}'
     result = llm_helper.parse_retailer_reply(reply)
     assert result["retailers"] == [{"name": "Bunnings", "homepage": None}]
+
+
+def test_web_retailer_reply_requires_a_verified_homepage():
+    reply = ('{"retailers": ['
+             '{"name":"Good Store","homepage":"https://store.example"},'
+             '{"name":"Unsourced Store","homepage":null}],"note":null}')
+    result = llm_helper.parse_web_retailer_reply(reply)
+    assert result["retailers"] == [
+        {"name": "Good Store", "homepage": "https://store.example"}
+    ]
 
 
 def test_more_than_eight_retailers_is_truncated():

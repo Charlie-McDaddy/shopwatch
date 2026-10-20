@@ -1254,10 +1254,9 @@ def api_complete_research_job(job_id: int, payload: dict = Body(...)) -> Any:
 
 # ------------------------------------------------------------------- llm jobs (wizard)
 #
-# Same job-lifecycle shape as research jobs above, claimed by a completely different
-# kind of runner: not a fixed host script on opti, but tools/llm-helper.py running on
-# WHOEVER's own machine, using their own already-authenticated Claude Code or Codex CLI.
-# This server never holds that credential and never needs one of its own.
+# Same job-lifecycle shape as research jobs above. The fixed host runner claims these
+# jobs too, using the host's existing Claude Code session; the CLI credential stays
+# outside the web container.
 
 
 @app.post("/api/llm-jobs", status_code=202)
@@ -1283,10 +1282,10 @@ def api_get_llm_job(job_id: int) -> Any:
 
 @app.post("/api/llm-jobs/claim")
 def api_claim_llm_job() -> Any:
-    """Called only by a user's own tools/llm-helper.py, never by the wizard UI.
+    """Claimed by the host runner (or a compatible standalone helper).
 
     Atomically claims the oldest QUEUED job. Returns null when there is nothing to do -
-    the runner is expected to poll this on its own short interval while it is running.
+    the host runner polls this alongside other research queues.
     """
     with session() as conn:
         return jsonable(llm_jobs.claim_next_queued(conn))
@@ -1294,7 +1293,7 @@ def api_claim_llm_job() -> Any:
 
 @app.post("/api/llm-jobs/{job_id}/complete")
 def api_complete_llm_job(job_id: int, payload: dict = Body(...)) -> Any:
-    """Called only by tools/llm-helper.py, exactly once per job."""
+    """Report the result from the host runner or compatible standalone helper."""
     status = payload.get("status")
     with session() as conn:
         if llm_jobs.get_job(conn, job_id) is None:

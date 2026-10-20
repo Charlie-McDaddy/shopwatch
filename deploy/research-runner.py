@@ -42,12 +42,16 @@ product page to offer as tickable "add as a listing" candidates.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import math
+import os
 import re
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -67,11 +71,59 @@ FIRECRAWL_MAX_CANDIDATES = 8
 #: Matches the house convention already set by app/offers.py's own CLI timeouts.
 RETAILER_TIMEOUT_SECONDS = 90
 
+#: CLI stderr can contain account or session details. Keep it out of job results,
+#: HTTP responses, and logs; the host operator can inspect local CLI authentication.
+CLI_ACCESS_FAILURE = (
+    "Claude Code could not complete this search. Reconnect the Claude Code session "
+    "on the research host, then retry."
+)
+
 #: A historical-low pass reads more sources than a single retailer's product page (a
 #: price-history tracker, a deal-forum thread, a comparison site), so it gets more time
 #: than RETAILER_TIMEOUT_SECONDS - still one single-shot call, still well under
 #: JOB_CEILING_SECONDS.
 HISTORICAL_LOW_TIMEOUT_SECONDS = 150
+
+#: A sourced model lookup is a short single-search job, separate from the existing
+#: longer retailer price and historical research calls.
+LLM_TIMEOUT_SECONDS = 90
+
+CLAUDE_BILLING_OVERRIDES = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_AWS_API_KEY", "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_AWS_WORKSPACE_ID",
+    "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_REGION",
+    "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_PROFILE", "AWS_BEARER_TOKEN_BEDROCK",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+)
+
+
+class SubscriptionAccessUnavailable(RuntimeError):
+    """The host has no Claude.ai OAuth token configured for subscription-backed jobs."""
+
+
+def _run_subscription_claude(args: list[str], prompt: str, timeout: int) -> Any:
+    """Run Claude with the explicit subscription token and no API/provider overrides."""
+    token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if not token:
+        raise SubscriptionAccessUnavailable(
+            "Claude subscription OAuth token is not configured on the research host."
+        )
+    env = os.environ.copy()
+    for name in CLAUDE_BILLING_OVERRIDES:
+        env.pop(name, None)
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    settings = json.dumps({"env": {name: "" for name in CLAUDE_BILLING_OVERRIDES}})
+    with tempfile.TemporaryDirectory(prefix="shopwatch-claude-") as isolated_cli_home:
+        env["CLAUDE_CONFIG_DIR"] = isolated_cli_home
+        return subprocess.run(
+            [*args, "--settings", settings], input=prompt, capture_output=True, text=True,
+            timeout=timeout, cwd=isolated_cli_home, env=env,
+        )
 
 #: Hard ceiling for the whole job, independent of how many retailers it names. Backstops
 #: app/research.py's own time-based staleness check (JOB_CEILING_SECONDS) from the other
@@ -428,10 +480,12 @@ def research_one_retailer(
         )
         allowed_tools = "WebSearch,WebFetch"
     try:
-        proc = subprocess.run(
-            [claude_bin, "-p", "--allowedTools", allowed_tools],
-            input=prompt, capture_output=True, text=True, timeout=RETAILER_TIMEOUT_SECONDS,
+        proc = _run_subscription_claude(
+            [claude_bin, "-p", "--allowedTools", allowed_tools], prompt,
+            RETAILER_TIMEOUT_SECONDS,
         )
+    except SubscriptionAccessUnavailable as exc:
+        raise RunnerError("BLOCKED", str(exc)) from exc
     except FileNotFoundError as exc:
         raise RunnerError("NEEDS_MANUAL_CHECK", f"{claude_bin} not found") from exc
     except subprocess.TimeoutExpired as exc:
@@ -439,12 +493,8 @@ def research_one_retailer(
             "TIMED_OUT", f"no reply within {RETAILER_TIMEOUT_SECONDS}s"
         ) from exc
     if proc.returncode != 0:
-        stderr = (proc.stderr or "non-zero exit")[:300]
-        # A dead OAuth token (SECURITY.md's own documented failure mode) or a shared-quota
-        # 429 both land here indistinguishably from stderr text - report the raw reason
-        # rather than guessing, since guessing which one it was is exactly the "silence is
-        # not a clean bill of health" trap.
-        raise RunnerError("BLOCKED", f"claude exited {proc.returncode}: {stderr}")
+        # Stderr is deliberately not persisted: it can contain session details.
+        raise RunnerError("BLOCKED", CLI_ACCESS_FAILURE)
 
     return parse_research_reply(proc.stdout)
 
@@ -480,11 +530,12 @@ def research_historical_low(
         excluded_section=_excluded_retailers_section(excluded_names),
     )
     try:
-        proc = subprocess.run(
-            [claude_bin, "-p", "--allowedTools", "WebSearch,WebFetch"],
-            input=prompt, capture_output=True, text=True,
-            timeout=HISTORICAL_LOW_TIMEOUT_SECONDS,
+        proc = _run_subscription_claude(
+            [claude_bin, "-p", "--allowedTools", "WebSearch,WebFetch"], prompt,
+            HISTORICAL_LOW_TIMEOUT_SECONDS,
         )
+    except SubscriptionAccessUnavailable as exc:
+        raise RunnerError("FAILED", str(exc)) from exc
     except FileNotFoundError as exc:
         raise RunnerError("FAILED", f"{claude_bin} not found") from exc
     except subprocess.TimeoutExpired as exc:
@@ -492,8 +543,8 @@ def research_historical_low(
             "FAILED", f"no reply within {HISTORICAL_LOW_TIMEOUT_SECONDS}s"
         ) from exc
     if proc.returncode != 0:
-        stderr = (proc.stderr or "non-zero exit")[:300]
-        raise RunnerError("FAILED", f"claude exited {proc.returncode}: {stderr}")
+        # Stderr is deliberately not persisted: it can contain session details.
+        raise RunnerError("FAILED", CLI_ACCESS_FAILURE)
 
     try:
         return parse_historical_low_reply(proc.stdout)
@@ -624,6 +675,78 @@ def poll_once(base_url: str, claude_bin: str) -> bool:
             # The server's own time-based staleness check (research.reconcile_stale) is
             # the backstop if even this report fails to land.
             log.exception("could not even report job %s as FAILED", job["id"])
+    return True
+
+
+def poll_llm_once(base_url: str, claude_bin: str) -> bool:
+    """Claim one GUI model-suggestion job and answer it with Claude Code web tools."""
+    claim = requests.post(f"{base_url}/api/llm-jobs/claim", timeout=30)
+    claim.raise_for_status()
+    job = claim.json()
+    if job is None:
+        return False
+    job_url = f"{base_url}/api/llm-jobs/{job['id']}/complete"
+    try:
+        helper_path = Path(__file__).resolve().parents[1] / "tools" / "llm-helper.py"
+        spec = importlib.util.spec_from_file_location("shopwatch_llm_helper", helper_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("the shared LLM helper could not be loaded")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        kind = job.get("kind", "model_suggestion")
+        if kind == "model_suggestion":
+            prompt, parse = helper.build_web_prompt(job["query"]), helper.parse_web_reply
+        elif kind == "retailer_discovery":
+            prompt = helper.build_web_retailer_prompt(job["query"])
+            parse = helper.parse_web_retailer_reply
+        else:
+            raise RuntimeError("this job kind is not supported by the server runner")
+        proc = _run_subscription_claude(
+            [claude_bin, "-p", "--allowedTools", "WebSearch"],
+            prompt, LLM_TIMEOUT_SECONDS,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(CLI_ACCESS_FAILURE)
+        result = parse(proc.stdout)
+        completed = requests.post(
+            job_url, json={"status": "DONE", "result": json.dumps(result)}, timeout=30,
+        )
+        completed.raise_for_status()
+    except subprocess.TimeoutExpired:
+        failed = requests.post(
+            job_url,
+            json={"status": "FAILED", "error": "Claude Code search timed out; retry the job."},
+            timeout=30,
+        )
+        failed.raise_for_status()
+    except SubscriptionAccessUnavailable:
+        failed = requests.post(
+            job_url,
+            json={"status": "FAILED", "error": (
+                "Claude subscription OAuth token is not configured on the research host."
+            )},
+            timeout=30,
+        )
+        failed.raise_for_status()
+    except ValueError:
+        failed = requests.post(
+            job_url,
+            json={"status": "FAILED", "error": (
+                "Claude Code returned no usable sourced results. Retry the search."
+            )},
+            timeout=30,
+        )
+        failed.raise_for_status()
+    except Exception as exc:
+        # Do not return subprocess diagnostics or exception text, either of which may
+        # contain session details, to the GUI or runner journal.
+        log.warning("model research job %s failed", job["id"])
+        error = CLI_ACCESS_FAILURE if str(exc) == CLI_ACCESS_FAILURE else (
+            "Claude Code could not return sourced model suggestions. Reconnect the "
+            "Claude Code session on the research host, then retry."
+        )
+        failed = requests.post(job_url, json={"status": "FAILED", "error": error}, timeout=30)
+        failed.raise_for_status()
     return True
 
 
@@ -776,10 +899,12 @@ def main(argv: list[str] | None = None) -> int:
         # Each queue's own try/except (inside poll_once/poll_retailer_search_once)
         # only covers processing a job already claimed - the claim call itself can
         # still raise (a non-JSON error body, a dropped connection), and that must
-        # not cost the OTHER queue its turn this cycle. retailer-search goes first:
-        # it is bounded to ~30s, while a research job can run for minutes, so this
-        # ordering means a slow research job delays the NEXT tick's retailer-search
-        # poll rather than the current one.
+        # not cost the OTHER queues their turns. Keep the short GUI discovery work
+        # before the potentially long per-retailer price job.
+        try:
+            poll_llm_once(base_url, claude_bin)
+        except Exception:
+            log.exception("model research poll failed")
         try:
             poll_retailer_search_once(base_url, firecrawl_url)
         except Exception:

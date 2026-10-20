@@ -35,6 +35,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 #: Codex CLI's non-interactive invocation, correct as of this script's writing but a
 #: fast-moving target - if your installed version rejects this, run `codex exec --help`
@@ -79,6 +80,26 @@ Return ONLY a JSON object, no prose, no code fence, matching this shape:
 
 def build_prompt(query: str) -> str:
     return PROMPT_TEMPLATE.format(query=query)
+
+
+def build_web_prompt(query: str) -> str:
+    """Build the server runner's searched variant of the existing model prompt."""
+    return build_prompt(query) + """
+
+For this request, use WebSearch to find current, sourced product candidates. Return the
+same JSON shape, with an additional "source" field on each candidate containing the
+HTTP(S) URL that supports that exact model. Do not invent a source URL. If no reliable
+candidate can be sourced, return an empty candidates list and explain why in note.
+"""
+
+
+def build_web_retailer_prompt(query: str) -> str:
+    return build_retailer_prompt(query) + """
+
+Use WebSearch to find current Australian sellers for the exact product. Use the
+retailer's verified homepage as its source URL. Do not invent a homepage; return null
+when you cannot verify one.
+"""
 
 
 RETAILER_PROMPT_TEMPLATE = """You are helping someone find other real Australian
@@ -162,8 +183,28 @@ def parse_reply(raw: str) -> dict[str, Any]:
         model = str(item.get("model") or "").strip()
         if not model:
             continue
-        cleaned.append({"model": model, "label": str(item.get("label") or model).strip()})
+        candidate = {"model": model, "label": str(item.get("label") or model).strip()}
+        source = item.get("source")
+        if isinstance(source, str):
+            source = source.strip()
+            try:
+                parsed_source = urlparse(source)
+                if parsed_source.scheme.lower() in ("http", "https") and parsed_source.hostname:
+                    candidate["source"] = source
+            except ValueError:
+                pass
+        cleaned.append(candidate)
     return {"candidates": cleaned, "note": data.get("note")}
+
+
+def parse_web_reply(raw: str) -> dict[str, Any]:
+    """Keep only model suggestions with a usable HTTP(S) source."""
+    result = parse_reply(raw)
+    candidates = result["candidates"]
+    result["candidates"] = [item for item in candidates if item.get("source")]
+    if candidates and not result["candidates"] and not result["note"]:
+        result["note"] = "No candidate had a verifiable source link."
+    return result
 
 
 def parse_retailer_reply(raw: str) -> dict[str, Any]:
@@ -184,8 +225,25 @@ def parse_retailer_reply(raw: str) -> dict[str, Any]:
         if not name:
             continue
         homepage = item.get("homepage")
-        cleaned.append({"name": name, "homepage": str(homepage).strip() if homepage else None})
+        homepage = str(homepage).strip() if homepage else None
+        try:
+            if homepage and (urlparse(homepage).scheme.lower() not in ("http", "https")
+                             or not urlparse(homepage).hostname):
+                homepage = None
+        except ValueError:
+            homepage = None
+        cleaned.append({"name": name, "homepage": homepage})
     return {"retailers": cleaned, "note": data.get("note")}
+
+
+def parse_web_retailer_reply(raw: str) -> dict[str, Any]:
+    """Keep searched retailer suggestions only when they have a valid homepage."""
+    result = parse_retailer_reply(raw)
+    retailers = result["retailers"]
+    result["retailers"] = [item for item in retailers if item.get("homepage")]
+    if retailers and not result["retailers"] and not result["note"]:
+        result["note"] = "No retailer had a verifiable homepage link."
+    return result
 
 
 def call_claude(claude_bin: str, prompt: str) -> str:
