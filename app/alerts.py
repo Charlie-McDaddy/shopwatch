@@ -109,6 +109,10 @@ def evaluate_product(
             # the same rule, so the board and phone cannot recommend different offers.
             if not pricing.listing_is_comparable(listing):
                 continue
+            if not pricing.listing_eligibility(
+                listing, require_new=False, require_delivery=bool(rule["require_resolved"])
+            )[0]:
+                continue
             if (listing["condition"] or "NEW").upper() not in allowed:
                 continue
             if rule["require_resolved"] and not delivered.resolved:
@@ -167,6 +171,8 @@ def _protection_alerts(conn: sqlite3.Connection, product: Mapping[str, Any]) -> 
         # Same rule as the buy alerts: a listing you have rejected cannot be the
         # evidence for chasing a price guarantee against it.
         if not pricing.listing_is_comparable(listing):
+            continue
+        if not pricing.listing_eligibility(listing, require_new=False)[0]:
             continue
         if delivered.value >= paid:
             continue

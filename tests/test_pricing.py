@@ -258,6 +258,7 @@ def _delivered(rows):
     for row in rows:
         row["delivered"] = pricing.delivered_price(
             row["advertised_price"], freight=row.get("freight"))
+        row.setdefault("delivered_resolved", row["delivered"].resolved)
     return rows
 
 
@@ -266,9 +267,11 @@ def test_a_ruled_out_listing_is_never_the_answer_however_cheap():
     same question once a decision has been made about one of them."""
     rows = _delivered([
         {"retailer_name": "Crowdshop", "advertised_price": 869, "freight": 0,
-         "ruled_out": True},
+         "ruled_out": True, "condition": "NEW", "stock_status": "In Stock",
+         "verification": {k: {"status": "VERIFIED"} for k in ("model", "price", "stock")}},
         {"retailer_name": "Appliance Central", "advertised_price": 990, "freight": 0,
-         "ruled_out": False},
+         "ruled_out": False, "condition": "NEW", "stock_status": "In Stock",
+         "verification": {k: {"status": "VERIFIED"} for k in ("model", "price", "stock")}},
     ])
     best = pricing.best_listing(rows)
     assert best["retailer_name"] == "Appliance Central"
@@ -277,9 +280,42 @@ def test_a_ruled_out_listing_is_never_the_answer_however_cheap():
 def test_ruling_everything_out_leaves_no_answer_rather_than_a_rejected_one():
     rows = _delivered([
         {"retailer_name": "Crowdshop", "advertised_price": 869, "freight": 0,
-         "ruled_out": True},
+         "ruled_out": True, "condition": "NEW", "stock_status": "In Stock",
+         "verification": {k: {"status": "VERIFIED"} for k in ("model", "price", "stock")}},
     ])
     assert pricing.best_listing(rows) is None
+
+
+def test_best_listing_requires_a_confirmed_new_available_exact_offer():
+    base = {
+        "advertised_price": 800, "freight": 0, "condition": "NEW",
+        "stock_status": "In Stock", "delivered_resolved": True,
+        "verification": {key: {"status": "VERIFIED"} for key in ("model", "price", "stock")},
+    }
+    rows = _delivered([
+        {**base, "retailer_name": "Confirmed", "freight": 20},
+        {**base, "retailer_name": "Search snippet", "verification": {}},
+        {**base, "retailer_name": "Used", "condition": "USED"},
+        {**base, "retailer_name": "Unavailable", "stock_status": "Out of stock"},
+        {**base, "retailer_name": "Preorder", "stock_status": "Available for preorder"},
+        {**base, "retailer_name": "Unknown condition", "condition": None},
+        {**base, "retailer_name": "Unknown freight", "freight": None},
+    ])
+    assert pricing.best_listing(rows)["retailer_name"] == "Confirmed"
+
+
+def test_conditional_discount_requires_explicit_eligibility():
+    row = {
+        "advertised_price": 900, "freight": 10, "coupon_discount": 100,
+        "conditional_requirements": "new members only", "eligibility_confirmed": False,
+        "delivered_resolved": True,
+        "provenance": {"eligibility_confirmed": {"state": "MANUAL", "manual_locked": 1}},
+        "condition": "NEW", "stock_status": "In Stock",
+        "verification": {key: {"status": "VERIFIED"} for key in ("model", "price", "stock")},
+    }
+    assert pricing.listing_eligibility(row) == (False, ["new members only"])
+    row["eligibility_confirmed"] = True
+    assert pricing.listing_eligibility(row) == (True, [])
 
 
 def test_a_ruled_out_listing_is_still_plotted():

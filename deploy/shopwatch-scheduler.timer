@@ -1,0 +1,10 @@
+# Optional deployment recipe. Install and enable only when scheduled checks are wanted.
+[Unit]
+Description=Check Shopwatch products when their saved cadence is due
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

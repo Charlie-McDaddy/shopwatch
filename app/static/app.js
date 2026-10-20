@@ -58,6 +58,8 @@ function renderValue(span, value) {
     span.replaceChildren(el('span', '-', 'unresolved'));
   } else if (kind === 'money') {
     span.textContent = money(value);
+  } else if (kind === 'bool') {
+    span.textContent = value === 1 || value === '1' || value === true ? 'Confirmed' : 'Not confirmed';
   } else {
     span.textContent = value;
   }
@@ -197,11 +199,14 @@ function startEdit(span) {
     }
   } else {
     input = document.createElement('input');
-    input.type = kind === 'money' ? 'number' : kind === 'date' ? 'date' : 'text';
+    input.type = kind === 'money' ? 'number' : kind === 'date' ? 'date'
+      : kind === 'bool' ? 'checkbox' : 'text';
     if (kind === 'money') input.step = '0.01';
-    input.value = original;
+    if (kind === 'bool') input.checked = original === '1';
+    else input.value = original;
     input.size = Math.max(6, String(original).length + 2);
   }
+  if (span.dataset.label) input.setAttribute('aria-label', span.dataset.label);
   input.style.width = kind === 'money' ? '85px' : kind === 'date' ? '145px' : 'auto';
   span.textContent = '';
   span.appendChild(input);
@@ -221,13 +226,13 @@ function startEdit(span) {
   const commit = async () => {
     if (settled) return;
     settled = true;
-    const value = input.value.trim();
+    const value = kind === 'bool' ? String(input.checked) : input.value.trim();
     span.classList.remove('editing');
     if (value === original) { cancel(); return; }
     span.classList.add('saving');
     try {
       const payload = {};
-      payload[span.dataset.field] = value === '' ? null : value;
+      payload[span.dataset.field] = kind === 'bool' ? input.checked : value === '' ? null : value;
       const result = await api(`/api/retailers/${span.dataset.listing}`, { method: 'PATCH', body: payload });
       dirtyCells.delete(span);
       span.classList.remove('dirty', 'saving');
@@ -1732,7 +1737,7 @@ wire('del-confirm-go', async event => {
 wire('btn-edit-product', () => document.getElementById('product-dialog').showModal());
 wire('ep-save', async () => {
   const productId = Number(location.pathname.split('/').pop());
-  const text = ['name', 'model', 'brand', 'category', 'generation', 'verdict', 'status', 'vesa',
+  const text = ['name', 'model', 'brand', 'category', 'generation', 'verdict', 'status', 'buying_mode', 'vesa',
     'fit_notes', 'notes', 'lowest_known_notes', 'lowest_known_date', 'lowest_known_retailer', 'quantity_unit'];
   const numeric = ['trigger_price', 'excellent_price', 'historical_low_price',
     'lowest_known_price', 'width_mm', 'height_mm', 'depth_mm', 'weight_kg', 'quantity'];
@@ -2269,11 +2274,22 @@ wire('household-settings-form', async event => {
   event.preventDefault();
   const postcode = document.getElementById('household-postcode').value.trim();
   const pickup_radius_km = Number(document.getElementById('household-pickup-radius').value);
+  const timezone = document.getElementById('household-timezone').value.trim();
   try {
     await api('/api/household-settings', { method: 'PATCH', body: {
-      postcode: postcode || null, pickup_radius_km
+      postcode: postcode || null, pickup_radius_km, timezone
     }});
     toast('Local area saved.', 'good');
     location.reload();
   } catch (err) { toast(`Could not save local area: ${err.message}`, 'bad'); }
+});
+
+wire('save-check-cadence', async event => {
+  const productId = document.getElementById('check-schedule').dataset.product;
+  const cadence = document.getElementById('check-cadence').value;
+  try {
+    await api(`/api/products/${productId}/check-schedule`, { method: 'PATCH', body: { cadence } });
+    toast('Price check schedule saved.', 'good');
+    location.reload();
+  } catch (err) { toast(`Could not save schedule: ${err.message}`, 'bad'); }
 });

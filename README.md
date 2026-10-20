@@ -909,15 +909,15 @@ when an alert could not be delivered. A run that exits 0 genuinely did something
 ### cron
 
 > ⚠ **Do not install this without reading "Scheduling the watch" above.** There is
-> deliberately no timer: a scheduled run pushes four `security-events` alerts on every
-> pass and they cannot be suppressed without weakening opti's egress allowlist. These
-> recipes are kept for the day that changes, or for a host with no egress monitoring.
+> no production timer enabled. Before enabling these recipes, complete the operational
+> verification in #14, including legitimate outbound monitoring configuration and a
+> bounded scheduled-run check.
 
 ```cron
-# /etc/cron.d/shopwatch: twice a day, output captured, failures mailed
+# /etc/cron.d/shopwatch: poll due product schedules every 15 minutes
 MAILTO=you@example.com
-17 7,19 * * * root cd /opt/shopwatch && docker compose exec -T shopwatch \
-  python -m app.price_watch --trigger cron >> /var/log/shopwatch.log 2>&1
+*/15 * * * * root cd /opt/shopwatch && docker compose exec -T shopwatch \
+  python -m app.schedules >> /var/log/shopwatch.log 2>&1
 ```
 
 Set `MAILTO` or pipe to something that reads the exit code. A cron line that redirects
@@ -925,9 +925,12 @@ everything to a logfile nobody reads is how a dead watcher stays dead.
 
 ### systemd timer
 
-> ⚠ Same warning as above: no timer is installed on opti on purpose.
+The optional units in `deploy/shopwatch-scheduler.service` and
+`deploy/shopwatch-scheduler.timer` poll saved product schedules every 15 minutes. They
+are examples only: the application and Docker do not enable them. No timer is installed
+on the production host.
 
-`/etc/systemd/system/shopwatch-watch.service`:
+`/etc/systemd/system/shopwatch-scheduler.service`:
 
 ```ini
 [Unit]
@@ -935,27 +938,27 @@ Description=Shopwatch price watch
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/shopwatch
-ExecStart=/usr/bin/docker compose exec -T shopwatch python -m app.price_watch --trigger cron
+ExecStart=/usr/bin/docker compose exec -T shopwatch python -m app.schedules
 # A failed run is visible rather than silent.
 OnFailure=status-email@%n.service
 ```
 
-`/etc/systemd/system/shopwatch-watch.timer`:
+`/etc/systemd/system/shopwatch-scheduler.timer`:
 
 ```ini
 [Unit]
-Description=Run the Shopwatch price watch twice a day
+Description=Poll Shopwatch product schedules
 [Timer]
-OnCalendar=*-*-* 07,19:17:00
+OnCalendar=*:0/15
 Persistent=true
 [Install]
 WantedBy=timers.target
 ```
 
 ```bash
-systemctl daemon-reload && systemctl enable --now shopwatch-watch.timer
-systemctl list-timers shopwatch-watch.timer     # proves it is scheduled
-journalctl -u shopwatch-watch.service -n 50     # proves it ran
+systemctl daemon-reload && systemctl enable --now shopwatch-scheduler.timer
+systemctl list-timers shopwatch-scheduler.timer # proves it is scheduled
+journalctl -u shopwatch-scheduler.service -n 50 # proves it ran
 ```
 
 ---

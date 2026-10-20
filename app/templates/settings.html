@@ -17,6 +17,10 @@
       <input id="household-pickup-radius" name="pickup_radius_km" type="number" min="1" max="500" step="1" value="{{ settings.pickup_radius_km }}">
       <small>Manual distance guide only; stock and radius are not checked automatically.</small>
     </label>
+    <label>Household timezone
+      <input id="household-timezone" name="timezone" value="{{ settings.timezone }}" placeholder="Australia/Brisbane" required>
+      <small>Used for daily, twice-weekly, weekly and monthly check dates.</small>
+    </label>
     <div class="wide"><button class="primary" type="submit">Save local area</button></div>
   </form>
 </section>

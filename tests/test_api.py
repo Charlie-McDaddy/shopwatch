@@ -57,6 +57,33 @@ def test_historical_low_date_and_retailer_show_on_the_product_page(client):
     assert "from eBay (Shopping Express, AU)" in body
     assert "18 Nov 2025" in body
     assert "OzBargain deal history shows a one-off low via eBay." in body
+    assert "Saved historical-low record" in body
+    assert "$869.00" in body
+    assert "dated 2025-11-18" in body
+    assert "Source / confirmation note" in body
+    assert "Check the source note" in body
+
+
+def test_buying_advice_marks_a_saved_ai_low_as_unconfirmed(client):
+    product = q930h(client)
+    client.patch(
+        f"/api/products/{product['id']}",
+        json={
+            "lowest_known_price": 777,
+            "lowest_known_date": "2025-11-28",
+            "lowest_known_retailer": "JB Hi-Fi",
+            "lowest_known_notes": (
+                "AI-estimated historical low, unconfirmed. Source: archived deal thread."
+            ),
+        },
+    )
+
+    body = client.get(f"/products/{product['id']}").text
+    assert "$777.00" in body
+    assert "2025-11-28" in body
+    assert "JB Hi-Fi" in body
+    assert "AI-estimated historical low, unconfirmed" in body
+    assert "marks this as an unconfirmed estimate" in body
 
 
 def test_bullet_formatted_historical_low_notes_render_as_a_real_list(client):
@@ -139,6 +166,44 @@ def test_inline_edit_persists_and_recalculates(client):
     # and it is still there on a fresh read
     again = client.get(f"/api/retailers/{listing['id']}").json()
     assert again["freight"] == 25.0
+
+
+def test_conditional_discount_needs_explicit_eligibility_for_best_price(client):
+    product = q930h(client)
+    listing = next(row for row in product["listings"]
+                   if row["retailer_name"] == "Appliance Central")
+    client.patch(f"/api/retailers/{listing['id']}", json={
+        "freight": 0, "coupon_discount": 100,
+        "conditional_requirements": "new members only",
+        "eligibility_confirmed": False, "stock_status": "In stock",
+    }).json()["listing"]
+    for aspect in ("model", "price", "stock"):
+        client.post(f"/api/retailers/{listing['id']}/verification",
+                    json={"aspect": aspect, "status": "VERIFIED"})
+
+    updated = client.get(f"/api/retailers/{listing['id']}").json()
+    assert updated["delivered_price"] == 1059
+    assert updated["provisional_delivered_price"] == 959
+    assert updated["eligibility_reasons"] == ["new members only"]
+    assert client.get(f"/api/products/{product['id']}").json()["best_retailer"] is None
+    rejected = client.patch(f"/api/retailers/{listing['id']}", json={
+        "manual": False, "eligibility_confirmed": True,
+    })
+    assert rejected.status_code == 400
+
+    confirmed = client.patch(
+        f"/api/retailers/{listing['id']}", json={"eligibility_confirmed": True}
+    ).json()["listing"]
+    assert confirmed["delivered_price"] == 959
+    assert confirmed["offer_eligible"] is True
+    assert client.get(f"/api/products/{product['id']}").json()["best_retailer"] == "Appliance Central"
+    assert "new members only" in client.get(f"/products/{product['id']}").text
+    mismatch = client.patch(
+        f"/api/retailers/{listing['id']}", json={"model_on_page": "HW-Q990H/XY"}
+    ).json()["listing"]
+    assert mismatch["model_match"] is False
+    assert mismatch["offer_eligible"] is False
+    assert client.get(f"/api/products/{product['id']}").json()["best_retailer"] is None
 
 
 def test_manual_override_survives_an_imported_automated_update(client):
@@ -597,6 +662,11 @@ def test_a_ruled_out_listing_stops_being_nominated_through_the_api(client):
     priced = [x for x in listings if x.get("delivered_price") is not None]
     assert priced, "control: the seed must have something priced, or this proves nothing"
     cheapest = min(priced, key=lambda x: x["delivered_price"])
+
+    client.patch(f"/api/retailers/{cheapest['id']}", json={"freight": 0})
+    for aspect in ("model", "price", "stock"):
+        client.post(f"/api/retailers/{cheapest['id']}/verification",
+                    json={"aspect": aspect, "status": "VERIFIED"})
 
     before = client.get(f"/api/products/{pid}").json()
     assert before["best_retailer"] == cheapest["retailer_name"], (
@@ -1243,13 +1313,17 @@ def test_pause_resume_and_restore_keep_the_same_product_and_history(client):
 
 def test_household_location_preferences_default_and_persist(client):
     initial = client.get("/api/household-settings").json()
-    assert initial == {"postcode": None, "pickup_radius_km": 25}
+    assert initial == {
+        "postcode": None, "pickup_radius_km": 25, "timezone": "Australia/Brisbane"
+    }
 
     saved = client.patch(
         "/api/household-settings", json={"postcode": "4000", "pickup_radius_km": 40}
     )
     assert saved.status_code == 200
-    assert saved.json() == {"postcode": "4000", "pickup_radius_km": 40}
+    assert saved.json() == {
+        "postcode": "4000", "pickup_radius_km": 40, "timezone": "Australia/Brisbane"
+    }
     assert client.get("/api/household-settings").json() == saved.json()
 
 
@@ -1375,6 +1449,7 @@ def test_wayback_history_is_saved_and_rendered_without_changing_confirmed_lows(c
     assert "2023-01-01" in page.text
     assert "https://web.archive.org/web/20230101000000id_" in page.text
     assert "freight and discount eligibility unknown" in page.text
+    assert "Wayback captured an advertised $899.00" in page.text
 
     after = client.get(f"/api/products/{product['id']}").json()
     assert after["lowest_known_price"] == product["lowest_known_price"]
@@ -1429,6 +1504,9 @@ def test_postcode_change_requires_current_freight_confirmation(client):
     confirmed = client.patch(f"/api/retailers/{listing_id}", json={"freight": 25, "pickup_status": "Available", "pickup_location": "Brisbane CBD"}).json()["listing"]
     assert confirmed["delivered_resolved"] is True
     assert confirmed["pickup_current"] is True
+    for aspect in ("model", "price", "stock"):
+        client.post(f"/api/retailers/{listing_id}/verification",
+                    json={"aspect": aspect, "status": "VERIFIED"})
     first_alerts = client.post("/api/alerts/evaluate").json()["alerts"]
     assert any(alert["listing_id"] == listing_id for alert in first_alerts)
     history_before_move = client.get(f"/api/price-history/{product['id']}").json()
@@ -1484,3 +1562,115 @@ def test_postcode_change_requires_current_freight_confirmation(client):
 
     client.patch("/api/household-settings", json={"pickup_radius_km": 75})
     assert client.get(f"/api/retailers/{listing_id}").json()["delivered_resolved"] is True
+
+
+def test_buying_advice_uses_saved_intent_and_shows_evidence_and_uncertainty(client, monkeypatch):
+    from datetime import date as Date
+
+    import app.main
+
+    class FixedDate(Date):
+        @classmethod
+        def today(cls):
+            return cls(2024, 10, 31)
+
+    monkeypatch.setattr(app.main, "date", FixedDate)
+    product = q930h(client)
+    assert product["buying_mode"] == "just_watching"
+    saved = client.patch(
+        f"/api/products/{product['id']}", json={"buying_mode": "buy_asap"}
+    )
+    assert saved.status_code == 200
+    assert saved.json()["buying_mode"] == "buy_asap"
+
+    body = client.get(f"/products/{product['id']}").text
+    assert "Buying advice" in body
+    assert "Buy ASAP" in body
+    assert "Black Friday" in body
+    assert "Boxing Day" in body
+    assert "neither guarantees a discount" in body
+    assert "Black Friday 2024-11-29" in body
+    assert "Boxing Day 2024-12-26" in body
+    assert "No confirmed eligible current offer is recorded" in body
+    assert "No dated delivered observation is available" in body
+    assert "Price history" in body
+
+
+def test_buying_mode_rejects_unknown_values(client):
+    product = q930h(client)
+    response = client.patch(
+        f"/api/products/{product['id']}", json={"buying_mode": "whenever"}
+    )
+    assert response.status_code == 400
+
+
+def test_buying_advice_changes_with_intent_for_a_confirmed_offer(client):
+    product = q930h(client)
+    created = client.post(
+        f"/api/products/{product['id']}/retailers",
+        json={
+            "retailer": "Evidence Shop",
+            "url": "https://shop.example/evidence-item",
+            "advertised_price": 950,
+            "freight": 20,
+            "stock_status": "In stock",
+            "model_on_page": product["model"],
+            "condition": "NEW",
+        },
+    )
+    assert created.status_code == 201
+    listing_id = created.json()["id"]
+    for aspect in ("model", "price", "stock", "freight"):
+        result = client.post(
+            f"/api/retailers/{listing_id}/verification",
+            json={"aspect": aspect, "status": "VERIFIED"},
+        )
+        assert result.status_code == 200
+
+    offers = client.get(f"/api/products/{product['id']}/retailers").json()
+    current = next(row for row in offers if row["id"] == listing_id)
+    assert current["offer_eligible"] is True
+    watching = client.get(f"/products/{product['id']}").text
+    assert "You are just watching" in watching
+    assert "Evidence Shop" in watching
+    assert "source: ui" in watching
+    assert "not a comparable price signal" in watching
+    assert "not preserved well enough to establish comparable history" in watching
+    assert "source page" in watching
+    assert "https://shop.example/evidence-item" in watching
+    assert "Price history" in watching
+
+    saved = client.patch(
+        f"/api/products/{product['id']}", json={"buying_mode": "buy_asap"}
+    )
+    assert saved.status_code == 200
+    asap = client.get(f"/products/{product['id']}").text
+    assert "Your intent is to buy ASAP" in asap
+
+
+
+def test_buying_advice_sale_calendar_skips_passed_dates(client, monkeypatch):
+    from datetime import date as Date
+
+    import app.main
+
+    class FixedDate(Date):
+        @classmethod
+        def today(cls):
+            return cls(2024, 12, 27)
+
+    monkeypatch.setattr(app.main, "date", FixedDate)
+    product = q930h(client)
+    body = client.get(f"/products/{product['id']}").text
+    assert "Black Friday 2025-11-28" in body
+    assert "Boxing Day 2025-12-26" in body
+    assert "Boxing Day 2024-12-26" not in body
+
+
+
+def test_product_creation_rejects_unknown_buying_mode(client):
+    response = client.post(
+        "/api/products",
+        json={"name": "Invalid mode", "model": "INVALID-MODE", "buying_mode": "later"},
+    )
+    assert response.status_code == 400

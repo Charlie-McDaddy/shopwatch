@@ -159,6 +159,9 @@
         {% if household_settings.postcode %}Check stores within {{ household_settings.pickup_radius_km }} km of postcode {{ household_settings.postcode }}; distance and stock are not verified.
         {% else %}No postcode configured; local availability is unknown.{% endif %}
       </small>
+      {% if l.conditional_requirements %}
+      <small>Conditional offer: {{ l.conditional_requirements }}; {{ 'eligibility confirmed' if l.eligibility_confirmed else 'eligibility not confirmed' }}.</small>
+      {% endif %}
     </span>
     <span class="price" data-cell="delivered">
       {%- if l.delivered_price is none %}<span class="unresolved">no price</span>
@@ -168,7 +171,8 @@
       <small>{% if household_settings.postcode %}Delivery to postcode {{ household_settings.postcode }}: {% if l.delivered_resolved %}freight confirmed{% else %}freight is unknown{% endif %}{% else %}Delivery postcode not set; {% if l.delivered_resolved %}freight on file{% else %}freight is unknown{% endif %}{% endif %}{% if not l.freight_current and l.freight is not none %} Previous quote for postcode {{ l.freight_postcode or 'unknown area' }} retained; reconfirm freight for this postcode.{% endif %}</small>
     </span>
     <span class="note">
-      {%- if l.coupon_discount %}{{ l.coupon_discount|money }} code applied
+      {%- if l.coupon_discount and l.conditional_requirements and not l.eligibility_confirmed %}{{ l.coupon_discount|money }} conditional discount
+      {%- elif l.coupon_discount %}{{ l.coupon_discount|money }} code applied
       {%- elif l.diff_from_low is not none and l.diff_from_low > 0 %}{{ l.diff_from_low|money }} above the low
       {%- endif %}
     </span>
@@ -196,7 +200,7 @@
 
 {% macro editable(l, field, kind='text') %}
   {% set value = l[field] %}
-  <span data-edit data-listing="{{ l.id }}" data-field="{{ field }}" data-kind="{{ kind }}"
+  <span data-edit data-listing="{{ l.id }}" data-field="{{ field }}" data-kind="{{ kind }}" data-label="{{ field|replace('_', ' ') }}"
         data-raw="{{ value if value is not none else '' }}">{%-
     if value is none %}<span class="unresolved">-</span>{% elif kind == 'money' %}{{ value|money }}{% else %}{{ value }}{% endif -%}
   </span>
@@ -251,6 +255,17 @@
       <div class="k">Deal ends {{ prov(l, 'price_valid_until') }}</div>
       <div class="v">{{ editable(l, 'price_valid_until', 'date') }}</div>
     </div>
+    <div class="field" style="grid-column: 1 / -1">
+      <div class="k">Conditional offer requirements {{ prov(l, 'conditional_requirements') }}</div>
+      <div class="v">{{ editable(l, 'conditional_requirements') }}</div>
+    </div>
+    <div class="field">
+      <div class="k">I meet these requirements {{ prov(l, 'eligibility_confirmed') }}</div>
+      <div class="v">{{ editable(l, 'eligibility_confirmed', 'bool') }}</div>
+    </div>
+    {% if l.provisional_delivered_price is not none %}
+      <p class="muted" style="grid-column: 1 / -1">Conditional total {{ l.provisional_delivered_price|money }}; requirements not confirmed.</p>
+    {% endif %}
     <div class="field" style="grid-column: 1 / -1">
       <div class="k">In the box {{ prov(l, 'included_components') }}</div>
       <div class="v">{{ editable(l, 'included_components') }}</div>

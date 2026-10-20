@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from . import provenance, store, url_intake, wayback
+from . import provenance, schedules, store, url_intake, wayback
 from .db import utcnow
 
 # Finding keys that map onto listing fields.
@@ -43,6 +43,7 @@ FINDING_FIELD_MAP = {
     "notes": "seller_notes",
     "seller_notes": "seller_notes",
     "price_guide": "price_guide",
+    "conditional_requirements": "conditional_requirements",
     "source_url": "url",
     "url": "url",
 }
@@ -207,6 +208,10 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
         "alert_rules": rows("SELECT * FROM alert_rules ORDER BY id"),
         "category_specifications": rows("SELECT * FROM category_specifications ORDER BY id"),
         "household_settings": store.household_settings(conn),
+        "product_check_schedules": rows(
+            "SELECT product_id, cadence, last_attempt_at, last_success_at, next_due_at,"
+            " failures, last_error FROM product_check_schedules ORDER BY product_id"
+        ),
     }
     if include_history:
         data["price_history"] = rows("SELECT * FROM price_history ORDER BY id")
@@ -215,6 +220,23 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
             "SELECT * FROM wayback_price_evidence ORDER BY id"
         )
     return data
+
+
+def _snapshot_schedule_timestamp(value: Any, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        message = "timestamp is required" if value is None else "timestamp must be ISO text"
+        raise ValueError(message)
+    if "T" not in value and " " not in value:
+        raise ValueError("timestamp must include a time")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO text") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[str, Any]:
@@ -261,6 +283,56 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
         else:
             product_ids[snap["id"]] = store.create_product(conn, payload)
         report["products"] += 1
+
+    if "product_check_schedules" in data:
+        snapshots = data["product_check_schedules"]
+        if not isinstance(snapshots, list):
+            report["errors"].append("product_check_schedules: expected a list")
+        else:
+            for schedule in snapshots:
+                if not isinstance(schedule, Mapping):
+                    report["errors"].append("product_check_schedules: invalid row")
+                    continue
+                source_product_id = schedule.get("product_id")
+                if isinstance(source_product_id, bool) or not isinstance(source_product_id, int):
+                    report["errors"].append("product_check_schedules: invalid product id")
+                    continue
+                product_id = product_ids.get(source_product_id)
+                if product_id is None:
+                    report["errors"].append(
+                        f"product_check_schedules: unknown product {schedule.get('product_id')}"
+                    )
+                    continue
+                try:
+                    cadence = schedule.get("cadence")
+                    if not isinstance(cadence, str) or cadence not in schedules.CADENCES:
+                        raise ValueError("invalid cadence")
+                    last_attempt_at = _snapshot_schedule_timestamp(
+                        schedule.get("last_attempt_at"), optional=True
+                    )
+                    last_success_at = _snapshot_schedule_timestamp(
+                        schedule.get("last_success_at"), optional=True
+                    )
+                    next_due_at = _snapshot_schedule_timestamp(schedule.get("next_due_at"))
+                    failures = schedule.get("failures")
+                    if (isinstance(failures, bool) or not isinstance(failures, int)
+                            or not 0 <= failures <= 2**63 - 1):
+                        raise ValueError("failures must be a non-negative integer")
+                    last_error = schedule.get("last_error")
+                    if last_error is not None and not isinstance(last_error, str):
+                        raise ValueError("last_error must be text or null")
+                except ValueError as exc:
+                    report["errors"].append(
+                        f"product_check_schedules for product {schedule.get('product_id')}: {exc}"
+                    )
+                    continue
+                conn.execute(
+                    "UPDATE product_check_schedules SET cadence = ?, last_attempt_at = ?,"
+                    " last_success_at = ?, next_due_at = ?, failures = ?, last_error = ?"
+                    " WHERE product_id = ?",
+                    (cadence, last_attempt_at, last_success_at, next_due_at, failures,
+                     last_error[:500] if last_error is not None else None, product_id),
+                )
 
     prov_index: dict[tuple[Any, str], dict[str, Any]] = {
         (p["listing_id"], p["field"]): p for p in data.get("field_provenance", [])
@@ -331,6 +403,10 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
                 conn, lid, ver["aspect"], ver.get("status", "UNVERIFIED"), ver.get("note")
             )
 
+    price_change_reasons = {
+        "INITIAL", "CONTEXT_CHANGED", "RETAILER_PRICE_REDUCTION",
+        "NO_PRICE_REDUCTION", "UNKNOWN",
+    }
     for hist in data.get("price_history", []):
         pid = product_ids.get(hist.get("product_id"))
         lid = listing_ids.get(hist.get("listing_id"))
@@ -344,17 +420,25 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
         ).fetchone()
         if duplicate:
             continue
+        context = hist.get("price_context")
+        if context is not None and not isinstance(context, str):
+            report["errors"].append("price_history: price_context must be text or null")
+            continue
+        reason = hist.get("price_change_reason") or "UNKNOWN"
+        if not isinstance(reason, str) or reason not in price_change_reasons:
+            report["errors"].append("price_history: invalid price_change_reason")
+            continue
         conn.execute(
             "INSERT INTO price_history (product_id, listing_id, retailer_id, observed_at,"
             " advertised_price, delivered_price, freight, freight_resolved, cashback,"
-            " stock_status, condition, source, note)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " stock_status, condition, source, note, price_context, price_change_reason)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pid, lid, retailer_ids.get(hist.get("retailer_id")), hist.get("observed_at"),
                 hist.get("advertised_price"), hist.get("delivered_price"), hist.get("freight"),
                 int(hist.get("freight_resolved") or 0), hist.get("cashback"),
                 hist.get("stock_status"), hist.get("condition"),
-                hist.get("source") or "snapshot", hist.get("note"),
+                hist.get("source") or "snapshot", hist.get("note"), context, reason,
             ),
         )
         report["history"] += 1
