@@ -116,8 +116,10 @@ def test_batch_import_reports_failures_without_losing_the_good_rows(seeded):
 
 def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatch):
     with connect(seeded) as conn:
+        store.update_household_settings(conn, {"postcode": "4000", "pickup_radius_km": 40})
         snapshot = ingest.export_all(conn)
     assert snapshot["format"] == "shopwatch-snapshot"
+    assert snapshot["household_settings"] == {"postcode": "4000", "pickup_radius_km": 40}
     assert any(p["model"] == "HW-Q930H/XY" for p in snapshot["products"])
 
     from app.db import migrate
@@ -132,6 +134,7 @@ def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatc
         assert product is not None
         view = store.product_view(conn, product["id"])
         assert report["products"] == 1
+        assert store.household_settings(conn) == {"postcode": "4000", "pickup_radius_km": 40}
         assert len(view["listings"]) == 5
         assert view["trigger_price"] == 900
 

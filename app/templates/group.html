@@ -45,7 +45,9 @@
               <small>{% if member.best_resolved %}delivered{% else %}before freight{% endif %}, {{ member.best_retailer }}</small>
             {%- endif %}
           </span>
-          <span class="tag">{{ member.trigger_price|money if member.trigger_price else 'no trigger set' }}</span>
+          <span class="tag">{{ member.trigger_price|money if member.trigger_price else 'no trigger set' }}
+            <small>{% if household_settings.postcode %}Delivery to {{ household_settings.postcode }}; pickup distance and stock unverified{% else %}Delivery and pickup availability unknown{% endif %}</small>
+          </span>
         </a>
       </div>
     {% else %}

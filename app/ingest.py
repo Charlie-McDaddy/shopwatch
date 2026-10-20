@@ -195,6 +195,7 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
         "listing_verification": rows("SELECT * FROM listing_verification ORDER BY listing_id"),
         "alert_rules": rows("SELECT * FROM alert_rules ORDER BY id"),
         "category_specifications": rows("SELECT * FROM category_specifications ORDER BY id"),
+        "household_settings": store.household_settings(conn),
     }
     if include_history:
         data["price_history"] = rows("SELECT * FROM price_history ORDER BY id")
@@ -210,6 +211,12 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
     History rows are appended, de-duplicated on (listing, timestamp, price).
     """
     report = {"products": 0, "listings": 0, "history": 0, "preserved_manual": 0, "errors": []}
+
+    if isinstance(data.get("household_settings"), Mapping):
+        try:
+            store.update_household_settings(conn, data["household_settings"])
+        except ValueError as exc:
+            report["errors"].append(f"household_settings: {exc}")
 
     for spec in data.get("category_specifications", []):
         conn.execute(

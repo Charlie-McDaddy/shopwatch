@@ -2244,3 +2244,16 @@ wire('cd-save', async () => {
     location.reload();
   } catch (err) { toast(`Could not add candidate: ${err.message}`, 'bad'); }
 });
+
+wire('household-settings-form', async event => {
+  event.preventDefault();
+  const postcode = document.getElementById('household-postcode').value.trim();
+  const pickup_radius_km = Number(document.getElementById('household-pickup-radius').value);
+  try {
+    await api('/api/household-settings', { method: 'PATCH', body: {
+      postcode: postcode || null, pickup_radius_km
+    }});
+    toast('Local area saved.', 'good');
+    location.reload();
+  } catch (err) { toast(`Could not save local area: ${err.message}`, 'bad'); }
+});

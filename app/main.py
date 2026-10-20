@@ -243,6 +243,7 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
         groups = store.list_groups(conn) if status in ("ACTIVE", "ALL") else []
         counts = store.status_counts(conn)
         retailer_list = store.list_retailers(conn)
+        household_settings = store.household_settings(conn)
         # Whether the board is empty for THIS tab (nothing PARKED, say) is not the same
         # question as whether this is a brand-new install with nothing in it at all -
         # the onboarding panel belongs only to the second case, regardless of which tab
@@ -258,6 +259,7 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
             "products": products,
             "groups": groups,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "sort": sort,
             "status": status,
             "counts": counts,
@@ -288,6 +290,7 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
         rules = [dict(r) for r in conn.execute(
             "SELECT * FROM alert_rules WHERE product_id = ?", (product_id,))]
         cats = store.categories(conn)
+        household_settings = store.household_settings(conn)
     return templates.TemplateResponse(
         request,
         "product.html",
@@ -295,6 +298,7 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
             "product": product,
             "group": dict(group) if group else None,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "history": history,
             "rules": rules,
             "categories": cats,
@@ -314,6 +318,23 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
     )
 
 
+@app.get("/settings", response_class=HTMLResponse)
+def household_settings_page(request: Request) -> Any:
+    with session() as conn:
+        settings = store.household_settings(conn)
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "settings": settings,
+            "version": ASSET_VERSION,
+            "app_version": __version__,
+            "git_sha": GIT_SHA,
+            "git_sha_is_deploy": GIT_SHA_IS_DEPLOY,
+        },
+    )
+
+
 @app.get("/groups/{group_id}", response_class=HTMLResponse)
 def group_page(request: Request, group_id: int, sort: str = "delivered") -> Any:
     with session() as conn:
@@ -321,12 +342,14 @@ def group_page(request: Request, group_id: int, sort: str = "delivered") -> Any:
         if group is None:
             raise HTTPException(404, "no such group")
         retailer_list = store.list_retailers(conn)
+        household_settings = store.household_settings(conn)
     return templates.TemplateResponse(
         request,
         "group.html",
         {
             "group": group,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "sort": sort,
             "classes": pricing.CLASS_LABELS,
             "config": load_config(),
@@ -448,6 +471,21 @@ def download_llm_helper_zip(request: Request, url: str | None = Query(None)) -> 
         content=zip_bytes, media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="shopwatch-llm-helper.zip"'},
     )
+
+
+@app.get("/api/household-settings")
+def api_household_settings() -> Any:
+    with session() as conn:
+        return store.household_settings(conn)
+
+
+@app.patch("/api/household-settings")
+def api_update_household_settings(payload: dict = Body(...)) -> Any:
+    with session() as conn:
+        try:
+            return store.update_household_settings(conn, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/products")

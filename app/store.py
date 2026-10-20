@@ -42,6 +42,7 @@ STATUSES = ["ACTIVE", "PURCHASED", "PARKED"]
 #: identity colour (retailer_color, hashed from the retailer's id). The two never
 #: appear on the same page, so reusing one palette is not a collision risk.
 CANDIDATE_PALETTE = ["blue", "amber", "green", "violet", "orange", "teal", "pink", "taupe"]
+DEFAULT_PICKUP_RADIUS_KM = 25
 
 
 def normalise_model(model: str | None) -> str:
@@ -161,6 +162,36 @@ def retailer_color(retailer_id: int | None) -> str | None:
         return None
     index = zlib.crc32(str(retailer_id).encode()) % len(CANDIDATE_PALETTE)
     return f"var(--candidate-{index + 1})"
+
+
+def household_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT postcode, pickup_radius_km FROM household_settings WHERE id = 1"
+    ).fetchone()
+    return dict(row)
+
+
+def update_household_settings(
+    conn: sqlite3.Connection, data: Mapping[str, Any]
+) -> dict[str, Any]:
+    current = household_settings(conn)
+    postcode = data.get("postcode", current["postcode"])
+    if postcode is not None:
+        if not isinstance(postcode, str):
+            raise ValueError("postcode must be a four-digit string or blank")
+        postcode = postcode.strip()
+        if postcode and (len(postcode) != 4 or not postcode.isascii() or not postcode.isdigit()):
+            raise ValueError("postcode must be a four-digit string")
+        postcode = postcode or None
+
+    radius = data.get("pickup_radius_km", current["pickup_radius_km"])
+    if isinstance(radius, bool) or not isinstance(radius, int) or not 1 <= radius <= 500:
+        raise ValueError("pickup_radius_km must be a whole number from 1 to 500")
+    conn.execute(
+        "UPDATE household_settings SET postcode = ?, pickup_radius_km = ? WHERE id = 1",
+        (postcode, radius),
+    )
+    return household_settings(conn)
 
 
 # --------------------------------------------------------------------------- products

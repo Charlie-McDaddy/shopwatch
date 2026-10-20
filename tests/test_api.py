@@ -1239,3 +1239,54 @@ def test_pause_resume_and_restore_keep_the_same_product_and_history(client):
     purchases = client.get("/api/purchases").json()
     assert any(row["product_id"] == pid for row in purchases)
     assert client.patch(f"/api/products/{pid}", json={"status": "ACTIVE"}).json()["status"] == "ACTIVE"
+
+
+def test_household_location_preferences_default_and_persist(client):
+    initial = client.get("/api/household-settings").json()
+    assert initial == {"postcode": None, "pickup_radius_km": 25}
+
+    saved = client.patch(
+        "/api/household-settings", json={"postcode": "4000", "pickup_radius_km": 40}
+    )
+    assert saved.status_code == 200
+    assert saved.json() == {"postcode": "4000", "pickup_radius_km": 40}
+    assert client.get("/api/household-settings").json() == saved.json()
+
+
+def test_household_location_preferences_reject_invalid_values(client):
+    for body in (
+        {"postcode": "400"}, {"postcode": "ABCD"}, {"postcode": 4000},
+        {"pickup_radius_km": 0}, {"pickup_radius_km": 501}, {"pickup_radius_km": 2.5},
+    ):
+        assert client.patch("/api/household-settings", json=body).status_code == 400
+
+
+def test_household_location_form_and_local_options_are_honest(client):
+    assert client.get("/settings").status_code == 200
+    product = client.post("/api/products", json={"name": "Widget", "model": "W-LOCAL-1"}).json()
+    listing = client.post(
+        f"/api/products/{product['id']}/retailers",
+        json={"retailer": "Local Shop", "advertised_price": 100},
+    ).json()
+    saved_listing = client.patch(
+        f"/api/retailers/{listing['id']}",
+        json={"pickup_status": "Available", "pickup_location": "Brisbane CBD"},
+    ).json()["listing"]
+    assert saved_listing["pickup_status"] == "Available"
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+
+    without_postcode = client.get(f"/products/{product['id']}").text
+    assert "Pickup: Available (manual; location not verified)" in without_postcode
+    assert "cost unknown." in without_postcode
+    assert "No postcode configured" in without_postcode
+
+    client.patch("/api/household-settings", json={"postcode": "4000"})
+    settings = client.get("/settings").text
+    assert 'value="4000"' in settings and 'value="25"' in settings
+    body = client.get(f"/products/{product['id']}").text
+    assert "Delivery to postcode 4000" in body
+    assert "freight is unknown" in body
+    assert "Pickup: Available" in body
+    assert "manual; location not verified" in body
+    assert "within 25 km" in body
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% import "_product.html" as c with context %}
+{% block title %}Household settings | Shopwatch{% endblock %}
+
+{% block breadcrumbs %}{{ c.breadcrumbs("Household settings") }}{% endblock %}
+
+{% block content %}
+<section class="panel" style="max-width:680px">
+  <h2>Local area</h2>
+  <p class="muted">Used to label delivery quotes and guide manual pickup checks. Shopwatch does not have store coordinates or postcode-level stock access, so it cannot verify distances or availability automatically.</p>
+  <form id="household-settings-form" class="form-grid">
+    <label>Four-digit Australian postcode
+      <input id="household-postcode" name="postcode" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" value="{{ settings.postcode or '' }}" placeholder="e.g. 4000">
+      <small>Leave blank when you do not want a location applied.</small>
+    </label>
+    <label>Pickup radius (km)
+      <input id="household-pickup-radius" name="pickup_radius_km" type="number" min="1" max="500" step="1" value="{{ settings.pickup_radius_km }}">
+      <small>Manual distance guide only; stock and radius are not checked automatically.</small>
+    </label>
+    <div class="wide"><button class="primary" type="submit">Save local area</button></div>
+  </form>
+</section>
+{% endblock %}
