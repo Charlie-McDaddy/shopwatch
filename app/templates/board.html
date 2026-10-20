@@ -37,7 +37,7 @@
     {% if status == 'ARCHIVED' %}
       <button data-restore-product="{{ product.id }}">Restore</button>
     {% elif product.status == 'PARKED' %}
-      <button data-resume-product="{{ product.id }}">Resume</button>
+      <button data-resume-product="{{ product.id }}" data-resume-status="{{ 'PURCHASED' if product.purchase else 'ACTIVE' }}">Resume</button>
       <button data-archive-product="{{ product.id }}" class="danger">Remove</button>
     {% else %}
       <button data-pause-product="{{ product.id }}">Pause</button>

@@ -1668,9 +1668,10 @@ for (const [attribute, status, archived, message] of [
     const id = button.getAttribute(attribute);
     try {
       await api(`/api/products/${id}`, { method: 'PATCH', body: {
-        ...(status ? { status } : {}), ...(archived !== undefined ? { archived } : {})
+        ...(status ? { status: button.dataset.resumeStatus || status } : {}),
+        ...(archived !== undefined ? { archived } : {})
       }});
-      location.href = status === 'PARKED' ? `/products/${id}` : '/';
+      location.href = `/products/${id}`;
       toast(message, 'good');
     } catch (err) { toast(`Could not update watch: ${err.message}`, 'bad'); }
   }));
