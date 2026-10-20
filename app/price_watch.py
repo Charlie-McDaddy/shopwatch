@@ -134,6 +134,10 @@ def check_listing(
     applied = provenance.apply_values(
         conn, listing["id"], values, state=provenance.LIVE, source=adapter.slug
     )
+    if "freight" in applied["written"]:
+        store.clear_freight_location_confirmation(conn, listing["id"])
+    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+        store.clear_pickup_location_confirmation(conn, listing["id"])
     conn.execute(
         "UPDATE listings SET last_checked_at = ?, updated_at = ?, check_error = NULL WHERE id = ?",
         (utcnow(), utcnow(), listing["id"]),

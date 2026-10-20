@@ -1286,8 +1286,8 @@ def test_household_location_form_and_local_options_are_honest(client):
     body = client.get(f"/products/{product['id']}").text
     assert "Delivery to postcode 4000" in body
     assert "freight is unknown" in body
-    assert "Pickup: Available" in body
-    assert "manual; location not verified" in body
+    assert "not confirmed for postcode 4000" in body
+    assert "Current pickup availability and cost unknown" in body
     assert "within 25 km" in body
     assert client.get(f"/api/price-history/{product['id']}").json() == history_before
 
@@ -1418,3 +1418,69 @@ def test_wayback_no_snapshot_shows_gap_and_keeps_product_watchable(client, monke
     assert "Wayback has no matching public page snapshots." in page.text
     assert "Check prices now" in page.text
     assert client.get(f"/api/price-history/{product['id']}").json() == history_before
+
+
+def test_postcode_change_requires_current_freight_confirmation(client):
+    client.patch("/api/household-settings", json={"postcode": "4000"})
+    product = q930h(client)
+    listing = next(row for row in product["listings"] if row["retailer_name"] == "Crowdshop")
+    listing_id = listing["id"]
+
+    confirmed = client.patch(f"/api/retailers/{listing_id}", json={"freight": 25, "pickup_status": "Available", "pickup_location": "Brisbane CBD"}).json()["listing"]
+    assert confirmed["delivered_resolved"] is True
+    assert confirmed["pickup_current"] is True
+    first_alerts = client.post("/api/alerts/evaluate").json()["alerts"]
+    assert any(alert["listing_id"] == listing_id for alert in first_alerts)
+    history_before_move = client.get(f"/api/price-history/{product['id']}").json()
+    known_low_before_stale_observation = client.get(
+        f"/api/products/{product['id']}"
+    ).json()["lowest_known_price"]
+    assert history_before_move[0]["freight_resolved"] == 1
+
+    client.patch("/api/household-settings", json={"postcode": "5000"})
+    stale = client.get(f"/api/retailers/{listing_id}").json()
+    assert stale["freight"] == 25.0  # retain the old quote and manual override
+    assert stale["delivered_price"] == stale["advertised_price"]  # excludes old freight
+    assert stale["delivered_resolved"] is False
+    assert stale["verification"]["freight"]["status"] == "STALE"
+    assert stale["pickup_status"] == "Available" and stale["pickup_location"] == "Brisbane CBD"
+    assert stale["pickup_current"] is False
+    assert "not confirmed for postcode 5000" in client.get(f"/products/{product['id']}").text
+    assert "Previous quote for postcode 4000" in client.get(f"/products/{product['id']}").text
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before_move
+    assert client.post("/api/alerts/evaluate").json()["alerts"] == []
+
+    client.patch(f"/api/retailers/{listing_id}", json={"advertised_price": 800})
+    stale_history = client.get(f"/api/price-history/{product['id']}").json()
+    assert stale_history[0]["freight"] == 25.0
+    assert stale_history[0]["freight_resolved"] == 0
+    assert client.get(f"/api/products/{product['id']}").json()["lowest_known_price"] == (
+        known_low_before_stale_observation
+    )
+
+    client.patch("/api/household-settings", json={"pickup_radius_km": 50})
+    radius_only = client.get(f"/api/retailers/{listing_id}").json()
+    assert radius_only["delivered_resolved"] is False
+
+    reconfirmed = client.patch(f"/api/retailers/{listing_id}", json={"freight": 25, "pickup_status": "Available", "pickup_location": "Brisbane CBD"}).json()["listing"]
+    assert reconfirmed["delivered_resolved"] is True
+    assert reconfirmed["pickup_current"] is True
+    assert reconfirmed["freight_current"] is True
+    assert reconfirmed["verification"]["freight"]["status"] != "STALE"
+    # A refresh that cannot replace manually locked values must not discard their
+    # postcode confirmation.
+    blocked_refresh = client.patch(
+        f"/api/retailers/{listing_id}",
+        json={"manual": False, "freight": 30, "pickup_status": "Unavailable"},
+    ).json()["listing"]
+    assert blocked_refresh["freight"] == 25.0
+    assert blocked_refresh["pickup_status"] == "Available"
+    assert blocked_refresh["freight_current"] is True
+    assert blocked_refresh["pickup_current"] is True
+    assert client.get(f"/api/price-history/{product['id']}").json()[0]["freight_resolved"] == 1
+    assert client.get(f"/api/products/{product['id']}").json()["lowest_known_price"] == 825
+    current_alerts = client.post("/api/alerts/evaluate").json()["alerts"]
+    assert any(alert["listing_id"] == listing_id for alert in current_alerts)
+
+    client.patch("/api/household-settings", json={"pickup_radius_km": 75})
+    assert client.get(f"/api/retailers/{listing_id}").json()["delivered_resolved"] is True

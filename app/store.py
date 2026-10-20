@@ -24,8 +24,10 @@ PRODUCT_FIELDS = [
     "mounting_notes", "vesa", "fit_notes", "archived",
 ]
 
-LISTING_FIELDS = provenance.TRACKED_FIELDS + ["product_id", "retailer_id", "active",
-    "seller_name", "seller_id", "offer_id", "offer_key"]
+LISTING_FIELDS = provenance.TRACKED_FIELDS + [
+    "product_id", "retailer_id", "active", "seller_name", "seller_id", "offer_id", "offer_key",
+    "freight_postcode", "pickup_postcode",
+]
 
 VERDICTS = ["BUY", "MAYBE", "IGNORE"]
 
@@ -170,6 +172,49 @@ def household_settings(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT postcode, pickup_radius_km FROM household_settings WHERE id = 1"
     ).fetchone()
     return dict(row)
+
+
+def effective_freight_for_listing(
+    listing: Mapping[str, Any], household_postcode: str | None
+) -> tuple[Any, bool]:
+    """Return the freight value valid for this postcode and whether it is current.
+
+    Unmarked legacy quotes retain their behavior when no household postcode is set. A
+    location-tagged quote counts only when its postcode matches the current setting. The
+    saved freight value and its provenance remain untouched when the postcode moves.
+    """
+    freight = listing["freight"]
+    quote_postcode = listing["freight_postcode"]
+    stale = freight is not None and quote_postcode != household_postcode
+    return (None if stale else freight), not stale
+
+
+def pickup_current_for_listing(listing: Mapping[str, Any], household_postcode: str | None) -> bool:
+    """Whether saved pickup information is confirmed for the current postcode."""
+    has_info = listing["pickup_status"] is not None or listing["pickup_location"] is not None
+    return not has_info or listing["pickup_postcode"] == household_postcode
+
+
+def confirm_pickup_for_household(conn: sqlite3.Connection, listing_id: int) -> None:
+    postcode = household_settings(conn)["postcode"]
+    conn.execute("UPDATE listings SET pickup_postcode = ? WHERE id = ?", (postcode, listing_id))
+
+
+def clear_pickup_location_confirmation(conn: sqlite3.Connection, listing_id: int) -> None:
+    conn.execute("UPDATE listings SET pickup_postcode = NULL WHERE id = ?", (listing_id,))
+
+
+def confirm_freight_for_household(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Associate a manually entered freight value with the current household postcode."""
+    postcode = household_settings(conn)["postcode"]
+    conn.execute(
+        "UPDATE listings SET freight_postcode = ? WHERE id = ?", (postcode, listing_id)
+    )
+
+
+def clear_freight_location_confirmation(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Do not treat a non-manual freight update as checked for the current postcode."""
+    conn.execute("UPDATE listings SET freight_postcode = NULL WHERE id = ?", (listing_id,))
 
 
 def update_household_settings(
@@ -332,7 +377,8 @@ def find_listing(
 
 
 def enrich_listing(
-    conn: sqlite3.Connection, row: sqlite3.Row, product: Mapping[str, Any], penalty: float
+    conn: sqlite3.Connection, row: sqlite3.Row, product: Mapping[str, Any], penalty: float,
+    household_postcode: str | None,
 ) -> dict[str, Any]:
     """Attach delivered price, classification, provenance and verification to a listing row."""
     listing = dict(row)
@@ -348,9 +394,12 @@ def enrich_listing(
         "BLOCKED" if listing.get("check_error") else
         "STALE" if stale else listing["check_capability"]
     )
+    effective_freight, freight_current = effective_freight_for_listing(
+        listing, household_postcode
+    )
     delivered = pricing.delivered_price(
         listing["advertised_price"],
-        listing["freight"],
+        effective_freight,
         listing["cashback"],
         listing["rebate"],
         listing["coupon_discount"],
@@ -358,12 +407,23 @@ def enrich_listing(
     listing["delivered"] = delivered
     listing["delivered_price"] = delivered.value
     listing["delivered_resolved"] = delivered.resolved
+    listing["freight_current"] = freight_current
+    listing["pickup_current"] = pickup_current_for_listing(listing, household_postcode)
     listing["classification"] = pricing.classify(delivered, product)
     listing["classification_label"] = pricing.CLASS_LABELS[listing["classification"]]
     listing["diff_from_low"] = pricing.difference_from_low(
         delivered, product.get("lowest_known_price")
     )
     listing["verification"] = provenance.verification_map(conn, listing["id"])
+    if not freight_current and listing["freight"] is not None:
+        listing["verification"]["freight"] = {
+            **listing["verification"]["freight"],
+            "status": provenance.STALE,
+            "note": (
+                f"Previous quote is for postcode {listing['freight_postcode'] or 'unknown'}; "
+                f"current postcode is {household_postcode}. Reconfirm freight."
+            ),
+        }
     listing["manual_fields"] = sorted(
         f for f, p in listing["provenance"].items() if p["manual_locked"]
     )
@@ -409,7 +469,10 @@ def listings_for_product(
         + where,
         (product["id"],),
     ).fetchall()
-    enriched = [enrich_listing(conn, r, product, penalty) for r in rows]
+    household_postcode = household_settings(conn)["postcode"]
+    enriched = [
+        enrich_listing(conn, r, product, penalty, household_postcode) for r in rows
+    ]
     key = SORT_KEYS.get(sort, SORT_KEYS["delivered"])
     enriched.sort(key=key)
     return enriched
@@ -838,8 +901,11 @@ def record_observation(
     row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
     if row is None or row["advertised_price"] is None:
         return None
+    current_freight, _freight_current = effective_freight_for_listing(
+        row, household_settings(conn)["postcode"]
+    )
     delivered = pricing.delivered_price(
-        row["advertised_price"], row["freight"], row["cashback"], row["rebate"],
+        row["advertised_price"], current_freight, row["cashback"], row["rebate"],
         row["coupon_discount"],
     )
     cur = conn.execute(

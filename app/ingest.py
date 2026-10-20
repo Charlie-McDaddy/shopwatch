@@ -116,6 +116,10 @@ def import_finding(
         state=state,
         source=source or finding.get("source") or "import",
     )
+    if "freight" in applied["written"]:
+        store.clear_freight_location_confirmation(conn, listing_id)
+    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+        store.clear_pickup_location_confirmation(conn, listing_id)
 
     checked_at = finding.get("checked_at") or utcnow()
     conn.execute(
@@ -280,6 +284,8 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
         })
         listing_ids[snap["id"]] = listing_id
 
+        freight_written = False
+        pickup_written = False
         for field in provenance.TRACKED_FIELDS:
             if field not in snap:
                 continue
@@ -293,8 +299,24 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
                 note=incoming.get("note"),
                 lock=True if locked else None,
             )
+            if field == "freight":
+                freight_written = wrote
+            if field in {"pickup_status", "pickup_location"}:
+                pickup_written = pickup_written or wrote
             if not wrote:
                 report["preserved_manual"] += 1
+        if freight_written:
+            # Older snapshots have no location marker, so their quote must remain
+            # unassociated with the destination household's postcode.
+            conn.execute(
+                "UPDATE listings SET freight_postcode = ? WHERE id = ?",
+                (snap.get("freight_postcode"), listing_id),
+            )
+        if pickup_written:
+            conn.execute(
+                "UPDATE listings SET pickup_postcode = ? WHERE id = ?",
+                (snap.get("pickup_postcode"), listing_id),
+            )
         conn.execute(
             "UPDATE listings SET last_checked_at = COALESCE(?, last_checked_at), updated_at = ?"
             " WHERE id = ?",

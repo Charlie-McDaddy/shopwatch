@@ -769,6 +769,10 @@ def api_create_listing(product_id: int, payload: dict = Body(...)) -> Any:
                 )
             except provenance.FieldError as exc:
                 raise HTTPException(400, str(exc)) from exc
+            if "freight" in values:
+                store.confirm_freight_for_household(conn, listing_id)
+            if "pickup_status" in values or "pickup_location" in values:
+                store.confirm_pickup_for_household(conn, listing_id)
             store.record_observation(conn, listing_id, source="ui")
         provenance.sync_verification_from_provenance(conn, listing_id)
         row = conn.execute(
@@ -779,7 +783,10 @@ def api_create_listing(product_id: int, payload: dict = Body(...)) -> Any:
         ).fetchone()
         product = store.get_product(conn, product_id)
         return jsonable(
-            store.enrich_listing(conn, row, dict(product), load_config().unresolved_freight_penalty)
+            store.enrich_listing(
+                conn, row, dict(product), load_config().unresolved_freight_penalty,
+                store.household_settings(conn)["postcode"],
+            )
         )
 
 
@@ -879,9 +886,13 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                     )
                 values = {} if mismatch else observation.to_values()
                 if values:
-                    provenance.apply_values(
+                    applied = provenance.apply_values(
                         conn, listing_id, values, state=provenance.LIVE, source=adapter_cls.slug
                     )
+                    if "freight" in applied["written"]:
+                        store.clear_freight_location_confirmation(conn, listing_id)
+                    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+                        store.clear_pickup_location_confirmation(conn, listing_id)
                     conn.execute(
                         "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
                         (utcnow(), utcnow(), listing_id),
@@ -907,7 +918,8 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
             (listing_id,),
         ).fetchone()
         listing = store.enrich_listing(
-            conn, row, dict(product), load_config().unresolved_freight_penalty
+            conn, row, dict(product), load_config().unresolved_freight_penalty,
+            store.household_settings(conn)["postcode"],
         )
         return {
             "listing": jsonable(listing),
@@ -951,6 +963,16 @@ def api_update_listing(listing_id: int, payload: dict = Body(...)) -> Any:
             )
         except provenance.FieldError as exc:
             raise HTTPException(400, str(exc)) from exc
+        if "freight" in applied["written"]:
+            if manual:
+                store.confirm_freight_for_household(conn, listing_id)
+            else:
+                store.clear_freight_location_confirmation(conn, listing_id)
+        if {"pickup_status", "pickup_location"} & set(applied["written"]):
+            if manual:
+                store.confirm_pickup_for_household(conn, listing_id)
+            else:
+                store.clear_pickup_location_confirmation(conn, listing_id)
         conn.execute(
             "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
             (utcnow(), utcnow(), listing_id),
@@ -966,7 +988,8 @@ def api_update_listing(listing_id: int, payload: dict = Body(...)) -> Any:
             (listing_id,),
         ).fetchone()
         listing = store.enrich_listing(
-            conn, fresh, dict(product), load_config().unresolved_freight_penalty
+            conn, fresh, dict(product), load_config().unresolved_freight_penalty,
+            store.household_settings(conn)["postcode"],
         )
         # The page leads with a sentence answering "should I buy this yet". Editing a
         # freight figure can change that answer, so the summary has to come back with
@@ -1010,7 +1033,8 @@ def _listing_view(conn, listing_id: int) -> dict[str, Any] | None:
         return None
     product = store.get_product(conn, row["product_id"])
     return store.enrich_listing(
-        conn, row, dict(product), load_config().unresolved_freight_penalty
+        conn, row, dict(product), load_config().unresolved_freight_penalty,
+        store.household_settings(conn)["postcode"],
     )
 
 

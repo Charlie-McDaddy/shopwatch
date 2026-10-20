@@ -119,9 +119,19 @@ def test_batch_import_reports_failures_without_losing_the_good_rows(seeded):
 def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatch):
     with connect(seeded) as conn:
         store.update_household_settings(conn, {"postcode": "4000", "pickup_radius_km": 40})
+        listing = conn.execute(
+            "SELECT id FROM listings ORDER BY id LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE listings SET freight = 25, freight_postcode = '4000', pickup_status = 'Available', pickup_location = 'Brisbane CBD', pickup_postcode = '4000' WHERE id = ?",
+            (listing["id"],),
+        )
         snapshot = ingest.export_all(conn)
     assert snapshot["format"] == "shopwatch-snapshot"
     assert snapshot["household_settings"] == {"postcode": "4000", "pickup_radius_km": 40}
+    exported_listing = next(row for row in snapshot["listings"] if row["id"] == listing["id"])
+    assert exported_listing["freight_postcode"] == "4000"
+    assert exported_listing["pickup_postcode"] == "4000"
     assert any(p["model"] == "HW-Q930H/XY" for p in snapshot["products"])
 
     from app.db import migrate
@@ -137,6 +147,13 @@ def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatc
         view = store.product_view(conn, product["id"])
         assert report["products"] == 1
         assert store.household_settings(conn) == {"postcode": "4000", "pickup_radius_km": 40}
+        restored_listing = conn.execute(
+            "SELECT freight, freight_postcode, pickup_postcode FROM listings WHERE product_id = ? ORDER BY id LIMIT 1",
+            (product["id"],),
+        ).fetchone()
+        assert restored_listing["freight"] == 25
+        assert restored_listing["freight_postcode"] == "4000"
+        assert restored_listing["pickup_postcode"] == "4000"
         assert len(view["listings"]) == 5
         assert view["trigger_price"] == 900
 
@@ -349,3 +366,23 @@ def test_snapshot_round_trip_preserves_wayback_evidence_and_coverage(seeded, tmp
         evidence, coverage = wayback.history(conn, restored["id"])
         assert evidence == []
         assert coverage[0]["status"] == "no_usable_price"
+
+
+def test_imported_freight_does_not_claim_the_household_postcode(seeded):
+    with connect(seeded) as conn:
+        store.update_household_settings(conn, {"postcode": "4000"})
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        known_low_before = product["lowest_known_price"]
+        result = ingest.import_finding(
+            conn,
+            {"model": "HW-Q930H/XY", "retailer": "Crowdshop", "price": 500, "freight": 0},
+        )
+
+        listing = store.product_view(conn, product["id"])["listings"]
+        imported = next(row for row in listing if row["id"] == result["listing_id"])
+        history = store.price_history(conn, product["id"])[0]
+        assert imported["freight"] == 0
+        assert imported["freight_postcode"] is None
+        assert imported["delivered_resolved"] is False
+        assert history["freight_resolved"] == 0
+        assert store.get_product(conn, product["id"])["lowest_known_price"] == known_low_before
