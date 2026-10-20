@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
-from . import provenance, store, url_intake
+from . import provenance, store, url_intake, wayback
 from .db import utcnow
 
 # Finding keys that map onto listing fields.
@@ -205,6 +206,10 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
     }
     if include_history:
         data["price_history"] = rows("SELECT * FROM price_history ORDER BY id")
+        data["wayback_checks"] = rows("SELECT * FROM wayback_checks ORDER BY id")
+        data["wayback_price_evidence"] = rows(
+            "SELECT * FROM wayback_price_evidence ORDER BY id"
+        )
     return data
 
 
@@ -331,6 +336,96 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
             ),
         )
         report["history"] += 1
+
+    # Wayback evidence is sourced archive history. Keep it with history snapshots, remap
+    # local ids by model/listing identity, and de-duplicate repeated restores.
+    wayback_check_ids: dict[Any, int] = {}
+    wayback_checks_by_id = {check.get("id"): check for check in data.get("wayback_checks", [])}
+    for check in data.get("wayback_checks", []):
+        pid = product_ids.get(check.get("product_id"))
+        if pid is None:
+            continue
+        checked_at = check.get("checked_at")
+        try:
+            datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            continue
+        status = check.get("status")
+        if status not in {"evidence", "no_snapshot", "no_usable_price", "blocked"}:
+            status = "blocked"
+        original_url = str(check.get("original_url") or "")[:2048]
+        note = str(check.get("note") or "")[:500]
+        lid = listing_ids.get(check.get("listing_id"))
+        duplicate = conn.execute(
+            "SELECT id FROM wayback_checks WHERE product_id = ?"
+            " AND IFNULL(listing_id, -1) = IFNULL(?, -1) AND original_url = ?"
+            " AND checked_at = ? AND status = ? AND note = ?",
+            (pid, lid, original_url, checked_at, status, note),
+        ).fetchone()
+        if duplicate:
+            wayback_check_ids[check.get("id")] = duplicate["id"]
+            continue
+        cursor = conn.execute(
+            "INSERT INTO wayback_checks (product_id, listing_id, original_url, checked_at,"
+            " status, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, lid, original_url, checked_at, status, note),
+        )
+        wayback_check_ids[check.get("id")] = int(cursor.lastrowid)
+
+    for evidence in data.get("wayback_price_evidence", []):
+        pid = product_ids.get(evidence.get("product_id"))
+        check_id = wayback_check_ids.get(evidence.get("check_id"))
+        if pid is None or check_id is None:
+            continue
+        lid = listing_ids.get(evidence.get("listing_id"))
+        check = wayback_checks_by_id.get(evidence.get("check_id"))
+        original_url = evidence.get("original_url") or ""
+        if (
+            not check
+            or check.get("status") != "evidence"
+            or original_url != (check.get("original_url") or "")
+        ):
+            continue
+        model = store.get_product(conn, pid)["model"]
+        clean = wayback.valid_archive_snapshot(original_url, model, {
+            "snapshot_url": evidence.get("snapshot_url"),
+            "captured_at": evidence.get("captured_at"),
+            "model": evidence.get("matched_model"),
+            "advertised_price": evidence.get("advertised_price"),
+            "currency": evidence.get("currency"),
+            "price_context": evidence.get("price_context"),
+        })
+        if clean is None:
+            continue
+        duplicate = conn.execute(
+            "SELECT 1 FROM wayback_price_evidence WHERE product_id = ?"
+            " AND IFNULL(listing_id, -1) = IFNULL(?, -1) AND snapshot_url = ?"
+            " AND captured_at = ? AND advertised_price = ?",
+            (pid, lid, clean["snapshot_url"], clean["captured_at"],
+             clean["advertised_price"]),
+        ).fetchone()
+        if duplicate:
+            continue
+        conn.execute(
+            "INSERT INTO wayback_price_evidence"
+            " (check_id, product_id, listing_id, original_url, snapshot_url, captured_at,"
+            " matched_model, advertised_price, currency, price_context)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (check_id, pid, lid, original_url, clean["snapshot_url"], clean["captured_at"],
+             clean["model"], clean["advertised_price"], clean["currency"], clean["price_context"]),
+        )
+
+    for old_id, new_id in wayback_check_ids.items():
+        check = wayback_checks_by_id.get(old_id)
+        if check and check.get("status") == "evidence":
+            found = conn.execute(
+                "SELECT 1 FROM wayback_price_evidence WHERE check_id = ? LIMIT 1", (new_id,)
+            ).fetchone()
+            if not found:
+                conn.execute(
+                    "UPDATE wayback_checks SET status = 'no_usable_price', note = ? WHERE id = ?",
+                    ("Imported snapshot contained no safely validated archive evidence.", new_id),
+                )
 
     return report
 

@@ -1308,3 +1308,113 @@ def test_purchase_in_a_group_keeps_its_candidates_visible_and_sibling_active(cli
     assert "Candidate A" in page and "Candidate B" in page
     assert "GPU options" in client.get("/").text
     assert "2 candidates" in client.get("/").text
+
+
+def test_wayback_history_is_saved_and_rendered_without_changing_confirmed_lows(client, monkeypatch):
+    from app import urls, wayback
+
+    product = client.get("/api/products").json()[0]
+    listing = product["listings"][0]
+    original_url = "https://retailer.example/product/model"
+    # Existing seed URL may be present; give this test one exact reference.
+    updated = client.patch(f"/api/retailers/{listing['id']}", json={"url": original_url})
+    assert updated.status_code == 200
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+
+    monkeypatch.setattr(
+        urls.socket, "getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", ("8.8.8.8", port or 443))],
+    )
+    requests_seen = []
+
+    class ArchiveResponse:
+        def __init__(self, body):
+            self.body = body
+            self.status_code = 200
+            self.headers = {"Content-Length": str(len(body))}
+
+        def iter_content(self, chunk_size):
+            yield self.body
+
+        def close(self):
+            pass
+
+    def archive_get(url, **kwargs):
+        requests_seen.append((url, kwargs))
+        if url == wayback.CDX_URL:
+            body = json.dumps(
+                [
+                    ["timestamp", "original", "statuscode", "mimetype"],
+                    ["20230101000000", kwargs["params"]["url"], "200", "text/html"],
+                ]
+            ).encode()
+        else:
+            product_data = {
+                "@type": "Product",
+                "model": product["model"],
+                "offers": {"price": "899.00", "priceCurrency": "AUD"},
+            }
+            body = (
+                "<html><script type='application/ld+json'>"
+                + json.dumps(product_data)
+                + "</script></html>"
+            ).encode()
+        return ArchiveResponse(body)
+
+    monkeypatch.setattr(wayback.requests, "get", archive_get)
+    response = client.post(f"/api/products/{product['id']}/wayback-history")
+    assert response.status_code == 200
+    assert response.json()["evidence_count"] == 1
+    assert len(requests_seen) == 2
+    assert all(call[1]["allow_redirects"] is False for call in requests_seen)
+
+    page = client.get(f"/products/{product['id']}")
+    assert page.status_code == 200
+    assert "Wayback price history" in page.text
+    assert "Archived advertised price" in page.text
+    assert "2023-01-01" in page.text
+    assert "https://web.archive.org/web/20230101000000id_" in page.text
+    assert "freight and discount eligibility unknown" in page.text
+
+    after = client.get(f"/api/products/{product['id']}").json()
+    assert after["lowest_known_price"] == product["lowest_known_price"]
+    history = client.get(f"/api/price-history/{product['id']}").json()
+    assert history == history_before
+
+
+def test_wayback_no_snapshot_shows_gap_and_keeps_product_watchable(client, monkeypatch):
+    from app import urls, wayback
+
+    product = client.get("/api/products").json()[0]
+    listing = product["listings"][0]
+    assert (
+        client.patch(
+            f"/api/retailers/{listing['id']}", json={"url": "https://retailer.example/item"}
+        ).status_code
+        == 200
+    )
+    monkeypatch.setattr(
+        urls.socket, "getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", ("8.8.8.8", port or 443))],
+    )
+
+    class EmptyArchiveResponse:
+        status_code = 200
+        headers = {"Content-Length": "51"}
+
+        def iter_content(self, chunk_size):
+            yield b'[["timestamp","original","statuscode","mimetype"]]'
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wayback.requests, "get", lambda *a, **k: EmptyArchiveResponse())
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+    response = client.post(f"/api/products/{product['id']}/wayback-history")
+    assert response.status_code == 200
+    assert response.json()["evidence_count"] == 0
+
+    page = client.get(f"/products/{product['id']}")
+    assert "Wayback has no matching public page snapshots." in page.text
+    assert "Check prices now" in page.text
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before

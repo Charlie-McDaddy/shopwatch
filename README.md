@@ -696,6 +696,24 @@ via `DELETE /api/retailers/{listing_id}`) - "reactivate by hand" means adding th
 through the ordinary "Add retailer manually" or "Add from a URL" flow, which creates a fresh
 listing.
 
+## Wayback price evidence
+
+A product page's **Check archived listings** action searches the Internet Archive CDX
+index for the exact public URLs already attached to that product. It checks a bounded
+number of recent captures per listing (at most eight listing URLs, 16 archive requests,
+and 30 seconds per check); any URLs beyond that limit are shown as a coverage gap. It
+only saves a price when the archived page
+contains the exact model plus an explicit AUD price in structured product data or
+OpenGraph metadata. The row links to its archived snapshot and shows the capture date,
+matched model/variant, and price context. Unknown freight and discount eligibility stay
+unknown; this evidence never changes confirmed delivered-price history or the recorded
+historical low.
+
+Missing, blocked, malformed, wrong-model, or non-AUD captures appear as coverage gaps
+and do not affect price watching. The [Internet Archive CDX documentation](https://github.com/internetarchive/wayback/blob/master/wayback-cdx-server/README.md)
+describes exact-URL queries and bounded result limits. Archive availability and capture
+coverage are not guaranteed, and this is not an all-time price record.
+
 ## Product and retailer research
 
 Model suggestions, retailer discovery and price research all start in the GUI and run
@@ -963,6 +981,7 @@ what would fire without sending anything.
 | `PATCH` | `/api/products/{id}` | targets, specs, dimensions, verdict |
 | `DELETE` | `/api/products/{id}` | archives, never deletes |
 | `GET` | `/api/products/{id}/retailers` | the listings |
+| `POST` | `/api/products/{id}/wayback-history` | bounded check of existing public listing URLs; persists sourced archive evidence and coverage gaps |
 | `POST` | `/api/products/{id}/retailers` | add a listing |
 | `POST` | `/api/products/{id}/retailers/from-url` | `{"url": "..."}`; derives the retailer, always saves the URL, scrapes or queues research |
 | `GET` | `/api/products/check-model?model=...` | deterministic duplicate check for the wizard |

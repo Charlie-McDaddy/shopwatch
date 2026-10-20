@@ -272,3 +272,78 @@ def test_marketplace_offers_survive_snapshot_round_trip(seeded, tmp_path, monkey
         assert [(row["seller_id"], row["advertised_price"]) for row in rows] == [
             ("SELLER-A", 20.0), ("SELLER-B", 22.0),
         ]
+
+
+def test_snapshot_round_trip_preserves_wayback_evidence_and_coverage(seeded, tmp_path, monkeypatch):
+    from app import wayback
+
+    with connect(seeded) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        listing = store.find_listing(
+            conn, product["id"], store.ensure_retailer(conn, "Crowdshop")["id"]
+        )
+        original_url = "https://www.crowdshop.example/soundbar"
+        snapshot_url = (
+            "https://web.archive.org/web/20230101000000id_/"
+            "https://www.crowdshop.example/soundbar"
+        )
+        wayback.persist_lookup(
+            conn,
+            product["id"],
+            listing["id"],
+            original_url,
+            product["model"],
+            {
+                "status": "evidence",
+                "note": "Archived advertised price; freight is unknown.",
+                "snapshots": [{
+                    "snapshot_url": snapshot_url,
+                    "captured_at": "2023-01-01T00:00:00Z",
+                    "model": product["model"],
+                    "advertised_price": 899.0,
+                    "currency": "AUD",
+                    "price_context": "Archived advertised price; freight unknown.",
+                }],
+            },
+            "2026-10-21T00:00:00Z",
+        )
+        snapshot = ingest.export_all(conn)
+        historyless = ingest.export_all(conn, include_history=False)
+        assert "wayback_price_evidence" in snapshot
+        assert "wayback_price_evidence" not in historyless
+
+    from app.db import migrate
+
+    target = tmp_path / "restored-wayback.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(target))
+    migrate(target)
+    with connect(target) as conn:
+        ingest.import_snapshot(conn, snapshot)
+        conn.commit()
+        restored = store.product_by_model(conn, "HW-Q930H/XY")
+        evidence, coverage = wayback.history(conn, restored["id"])
+        assert len(evidence) == 1
+        assert evidence[0]["snapshot_url"] == snapshot_url
+        assert evidence[0]["original_url"] == original_url
+        assert evidence[0]["captured_at"] == "2023-01-01T00:00:00Z"
+        assert evidence[0]["matched_model"] == "HW-Q930H/XY"
+        assert evidence[0]["advertised_price"] == 899.0
+        assert coverage[0]["status"] == "evidence"
+        # Re-importing a backup does not append the same archived capture a second time.
+        ingest.import_snapshot(conn, snapshot)
+        assert len(wayback.history(conn, restored["id"])[0]) == 1
+
+    bad_snapshot = copy.deepcopy(snapshot)
+    bad_snapshot["wayback_price_evidence"][0]["snapshot_url"] = (
+        "https://attacker.example/web/20230101000000id_/https://www.crowdshop.example/soundbar"
+    )
+    bad_target = tmp_path / "restored-wayback-untrusted.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(bad_target))
+    migrate(bad_target)
+    with connect(bad_target) as conn:
+        ingest.import_snapshot(conn, bad_snapshot)
+        conn.commit()
+        restored = store.product_by_model(conn, "HW-Q930H/XY")
+        evidence, coverage = wayback.history(conn, restored["id"])
+        assert evidence == []
+        assert coverage[0]["status"] == "no_usable_price"

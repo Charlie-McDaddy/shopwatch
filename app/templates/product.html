@@ -146,6 +146,40 @@
 </div>
 
 <div class="panel">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+    <h3 style="margin:0">Wayback price history</h3>
+    <button id="btn-wayback-history" data-product="{{ product.id }}">Check archived listings</button>
+  </div>
+  <p class="small muted" style="margin:8px 0">Archived advertised prices are historical evidence, not delivered prices.
+    Freight, discount eligibility and complete all-time coverage are unknown.</p>
+  {% if wayback_evidence %}
+  <div class="scroll-x">
+    <table class="plain">
+      <tr><th>Snapshot date</th><th>Retailer</th><th>Matched model / variant</th><th class="r">Advertised (AUD)</th><th>Context</th><th>Source</th></tr>
+      {% for item in wayback_evidence %}
+      <tr>
+        <td class="muted">{{ item.captured_at[:10] }}</td>
+        <td>{{ item.retailer_name or '-' }}</td>
+        <td class="num">{{ item.matched_model }}</td>
+        <td class="r num">{{ item.advertised_price|money }}</td>
+        <td class="small">{{ item.price_context }}</td>
+        <td class="small"><a href="{{ item.snapshot_url }}" target="_blank" rel="noopener noreferrer">Wayback snapshot</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% else %}<p class="muted small" style="margin:8px 0 0">No usable archive prices recorded yet. This does not affect watching.</p>{% endif %}
+  {% if wayback_coverage %}
+  <details class="more" style="margin-top:8px">
+    <summary>Coverage and gaps ({{ wayback_coverage|length }} listing{{ 's' if wayback_coverage|length != 1 }})</summary>
+    {% for check in wayback_coverage %}
+      <p class="small muted" style="margin:6px 0">{{ check.retailer_name or 'Listings' }}: {{ check.note }}</p>
+    {% endfor %}
+  </details>
+  {% endif %}
+</div>
+
+<div class="panel">
   <h3>Price history</h3>
   {% if history %}
   <details class="more" open>

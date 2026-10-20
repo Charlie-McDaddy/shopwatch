@@ -1088,6 +1088,22 @@ wire('al-save', async () => {
  * a URL-scoped research job otherwise, and the listing lands with its URL either way).
  */
 
+wire('btn-wayback-history', async event => {
+  const button = event.currentTarget;
+  const productId = Number(button.dataset.product);
+  button.disabled = true;
+  button.textContent = 'Checking archived listings...';
+  try {
+    const result = await api(`/api/products/${productId}/wayback-history`, { method: 'POST' });
+    toast(`${result.evidence_count} sourced archive price${result.evidence_count === 1 ? '' : 's'} found.`, 'good');
+    location.reload();
+  } catch (err) {
+    toast(`Could not check Wayback history: ${err.message}`, 'bad');
+    button.disabled = false;
+    button.textContent = 'Check archived listings';
+  }
+});
+
 wire('btn-add-listing-url', () => {
   for (const id of ['ul-url', 'ul-seller-name', 'ul-seller-id', 'ul-offer-id']) document.getElementById(id).value = '';
   document.getElementById('url-listing-dialog').showModal();

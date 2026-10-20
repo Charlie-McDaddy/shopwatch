@@ -35,6 +35,7 @@ from . import (
     retailers,
     store,
     url_intake,
+    wayback,
 )
 from .config import load_config
 from .db import backup, migrate, session, utcnow
@@ -287,6 +288,7 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
         group = store.get_group(conn, product["group_id"]) if product["group_id"] else None
         retailer_list = store.list_retailers(conn)
         history = store.price_history(conn, product_id, limit=200)
+        wayback_evidence, wayback_coverage = wayback.history(conn, product_id)
         rules = [dict(r) for r in conn.execute(
             "SELECT * FROM alert_rules WHERE product_id = ?", (product_id,))]
         cats = store.categories(conn)
@@ -300,6 +302,8 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
             "retailers": retailer_list,
             "household_settings": household_settings,
             "history": history,
+            "wayback_evidence": wayback_evidence,
+            "wayback_coverage": wayback_coverage,
             "rules": rules,
             "categories": cats,
             "sort": sort,
@@ -1153,6 +1157,91 @@ def api_price_history(product_id: int, limit: int = Query(500, le=5000)) -> Any:
         if store.get_product(conn, product_id) is None:
             raise HTTPException(404, "no such product")
         return store.price_history(conn, product_id, limit)
+
+
+@app.post("/api/products/{product_id}/wayback-history")
+def api_check_wayback_history(product_id: int) -> Any:
+    """Check bounded archived evidence for the product's existing exact listing URLs."""
+    with session() as conn:
+        product = store.get_product(conn, product_id)
+        if product is None:
+            raise HTTPException(404, "no such product")
+        model = product["model"]
+        url_listing_count = conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE product_id = ? AND active = 1"
+            " AND url IS NOT NULL AND url != ''",
+            (product_id,),
+        ).fetchone()[0]
+        listings = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT l.id, l.url, r.name AS retailer_name FROM listings l"
+                " JOIN retailers r ON r.id = l.retailer_id"
+                " WHERE l.product_id = ? AND l.active = 1 AND l.url IS NOT NULL AND l.url != ''"
+                " ORDER BY l.id LIMIT ?",
+                (product_id, wayback.MAX_LISTINGS),
+            )
+        ]
+    checked_at = utcnow()
+    results = []
+    budget = wayback.RequestBudget()
+    for listing in listings:
+        try:
+            result = wayback.lookup_listing(listing["url"], model, budget)
+        except Exception:
+            result = {
+                "status": "blocked",
+                "note": "Wayback could not be checked safely.",
+                "snapshots": [],
+            }
+        results.append((listing, result))
+
+    with session() as conn:
+        if store.get_product(conn, product_id) is None:
+            raise HTTPException(404, "no such product")
+        if not listings:
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                None,
+                "",
+                model,
+                {
+                    "status": "no_snapshot",
+                    "note": "No active listing URLs are available to check.",
+                    "snapshots": [],
+                },
+                checked_at,
+            )
+        if url_listing_count > len(listings):
+            skipped = url_listing_count - len(listings)
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                None,
+                "",
+                model,
+                {
+                    "status": "blocked",
+                    "note": (
+                        f"Lookup limit reached; {skipped} additional listing URLs were not checked."
+                    ),
+                    "snapshots": [],
+                },
+                checked_at,
+            )
+        for listing, result in results:
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                listing["id"],
+                listing["url"],
+                model,
+                result,
+                checked_at,
+            )
+        evidence, coverage = wayback.history(conn, product_id)
+        return {"checked": len(listings), "evidence_count": len(evidence), "coverage": coverage}
 
 
 @app.post("/api/price-watch/run")
