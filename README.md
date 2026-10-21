@@ -739,6 +739,35 @@ appears as a failed job with a reconnect-and-retry instruction; independent dire
 retailer checks continue. Model candidates include source links and remain suggestions:
 clicking one only fills the model field for the user to verify.
 
+### Issue #2 verification status
+
+The supported connection uses the native Claude Code CLI in non-interactive mode,
+not a direct call using a subscription token as an API key. See Claude Code's
+[subscription authentication](https://code.claude.com/docs/en/authentication) and
+[programmatic CLI usage](https://code.claude.com/docs/en/headless) documentation.
+Do not use `--bare` for this connection: that mode does not read subscription OAuth
+credentials.
+
+Controlled HTTP tests cover queued/running/completed research with source links,
+expired access, a missing subscription token and failed search. They also verify that
+the API key is not used and direct retailer checks continue after research fails.
+
+As of 21 October 2026, a successful subscription-backed WebSearch on opti has **not
+been verified for issue #2**. The implementation environment has neither the host's
+runner environment nor its SSH connection details. A local CLI login and controlled
+test responses are not evidence of operational access. Keep issue #2 open until the
+host check below succeeds; do not substitute paid API access.
+
+On the research host, use `claude setup-token` to create or replace the subscription
+token in the existing protected runner environment. Never paste the token into an
+issue, job result or log. Confirm that separately charged extra usage is disabled in
+the Claude account; the runner's API-key guards do not enforce account spending
+settings. Then start a model search in the GUI, confirm its queued/running/completed
+states and open a returned source link to verify the exact model. Record the job ID,
+date and source URL as evidence, without credentials. If access has expired, replace
+the token and submit a fresh search. A denied or unavailable WebSearch remains a
+feasibility blocker even when authentication succeeds.
+
 ## Deployed on opti
 
 Live at **https://shop.yourdomain.example** (LAN only, trusted `*.yourdomain.example` wildcard cert).

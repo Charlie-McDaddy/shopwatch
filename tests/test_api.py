@@ -9,6 +9,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app import provenance, store
 from app.db import connect
 
@@ -890,11 +892,17 @@ def test_create_llm_job_rejects_a_non_string_query_instead_of_crashing(client):
     assert response.status_code == 400
 
 
-def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(client, monkeypatch):
+@pytest.mark.parametrize("outcome", ["success", "expired", "missing", "failed_search"])
+def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(
+    client, monkeypatch, caplog, outcome,
+):
     created = client.post("/api/llm-jobs", json={"query": "robot mower"})
     assert created.status_code == 202
+    assert created.json()["status"] == "QUEUED"
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+    if outcome == "missing":
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
 
     path = Path(__file__).resolve().parents[1] / "deploy" / "research-runner.py"
     spec = importlib.util.spec_from_file_location("api_research_runner", path)
@@ -918,11 +926,15 @@ def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(client,
 
     def api_post(url, **kwargs):
         requested.append((url, kwargs))
-        return HttpResponse(client.post(url.removeprefix(base_url), json=kwargs.get("json")))
+        response = client.post(url.removeprefix(base_url), json=kwargs.get("json"))
+        if url.endswith("/claim"):
+            assert response.json()["status"] == "RUNNING"
+        return HttpResponse(response)
 
     monkeypatch.setattr(runner.requests, "post", api_post)
 
     def claude(args, **kwargs):
+        assert outcome != "missing", "missing subscription must not fall back to an API key"
         assert args[args.index("--allowedTools") + 1] == "WebSearch"
         assert "WebSearch" in kwargs["input"]
         assert kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-token"
@@ -930,6 +942,10 @@ def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(client,
         assert kwargs["cwd"] == kwargs["env"]["CLAUDE_CONFIG_DIR"]
         settings_arg = args[args.index("--settings") + 1]
         assert '"ANTHROPIC_API_KEY": ""' in settings_arg
+        if outcome == "expired":
+            return SimpleNamespace(returncode=1, stdout="", stderr="expired secret-session")
+        if outcome == "failed_search":
+            return SimpleNamespace(returncode=0, stdout="WebSearch failed secret-session", stderr="")
         return SimpleNamespace(
             returncode=0,
             stdout='{"candidates":[{"model":"RM-1","label":"Mower","source":"https://shop.example/rm-1"}],"note":null}',
@@ -940,6 +956,39 @@ def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(client,
     assert runner.poll_llm_once(base_url, "claude") is True
 
     result = client.get(f"/api/llm-jobs/{created.json()['id']}").json()
+    assert all(url.startswith(base_url + "/api/llm-jobs") for url, _ in requested)
+    if outcome != "success":
+        assert result["status"] == "FAILED"
+        assert result["result"] is None
+        assert "secret-session" not in json.dumps(result) + caplog.text
+        assert "must-not-be-used" not in json.dumps(result) + caplog.text
+        if outcome == "expired":
+            assert "Reconnect" in result["error"] and "retry" in result["error"]
+        elif outcome == "missing":
+            assert "OAuth token" in result["error"]
+        else:
+            assert "Retry" in result["error"]
+
+        from app.retailers.base import Observation, RetailerAdapter
+
+        product = q930h(client)
+        listing = next(row for row in product["listings"] if row["retailer_name"] == "JB Hi-Fi")
+        assert client.patch(f"/api/retailers/{listing['id']}", json={
+            "url": "https://www.jbhifi.com.au/products/test",
+        }).status_code == 200
+        monkeypatch.setattr(RetailerAdapter, "check", lambda *a, **kw: Observation(
+            advertised_price=999, stock_status="In stock", model_on_page=product["model"],
+        ))
+        checked = client.post("/api/price-watch/run", json={
+            "product_id": product["id"], "send_alerts": False,
+        })
+        assert checked.status_code == 200
+        assert checked.json()["ok"] >= 1
+        updated = client.get(f"/api/products/{product['id']}").json()
+        assert next(row for row in updated["listings"] if row["id"] == listing["id"])[
+            "advertised_price"
+        ] == 999
+        return
     assert result["status"] == "DONE"
     assert json.loads(result["result"])["candidates"] == [
         {"model": "RM-1", "label": "Mower", "source": "https://shop.example/rm-1"}
