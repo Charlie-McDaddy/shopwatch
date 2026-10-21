@@ -790,6 +790,16 @@ def _name_from_search_result(url: str, title: str) -> str:
     return _domain_display_name(domain)
 
 
+def _contains_exact_model(model: str, title: str) -> bool:
+    """Match complete model tokens while retaining regional suffix distinctions."""
+    target = re.sub(r"[^A-Z0-9]", "", model.upper())
+    words = re.findall(r"[A-Za-z0-9]+", title)
+    return bool(target) and any(
+        re.sub(r"[^A-Z0-9]", "", "".join(words[start:end]).upper()) == target
+        for start in range(len(words)) for end in range(start + 1, min(len(words), start + 6) + 1)
+    )
+
+
 def discover_retailers(
     firecrawl_url: str, product_name: str, model: str,
     excluded_names: list[str], excluded_homepages: list[str],
@@ -818,15 +828,20 @@ def discover_retailers(
     seen_domains: set[str] = set()
     candidates: list[dict[str, Any]] = []
     for item in data.get("data") or []:
+        if not isinstance(item, dict):
+            continue
         url = item.get("url") or ""
+        title = item.get("title") or ""
         domain = _bare_domain(url)
-        if not domain or domain in seen_domains or domain in excluded_domains:
+        if (not domain or domain in seen_domains or domain in excluded_domains
+                or not _safe_http_url(url) or not _contains_exact_model(model, title)):
             continue
         seen_domains.add(domain)
-        name = _name_from_search_result(url, item.get("title") or "")
+        name = _name_from_search_result(url, title)
         if name.lower() in excluded_names_lower:
             continue
-        candidates.append({"name": name, "homepage": f"https://{domain}"})
+        candidates.append({"name": name, "homepage": f"https://{domain}",
+                           "source_url": url, "source_title": title[:500]})
         if len(candidates) >= FIRECRAWL_MAX_CANDIDATES:
             break
     return {"retailers": candidates, "note": None}

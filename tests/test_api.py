@@ -954,6 +954,10 @@ def test_create_retailer_search_job_rejects_a_non_string_query_instead_of_crashi
 
 
 def test_retailer_search_job_lifecycle_through_the_api(client):
+    # Seeding now queues the product's initial discovery before wizard-only jobs.
+    initial = client.post("/api/retailer-search-jobs/claim").json()
+    client.post(f"/api/retailer-search-jobs/{initial['id']}/complete",
+                json={"status": "DONE", "result": '{"retailers": []}'})
     query = '{"product_name": "Test Product", "model": "TEST-1", "excluded_names": [], "excluded_homepages": []}'
     created = client.post("/api/retailer-search-jobs", json={"query": query}).json()
     assert created["status"] == "QUEUED"
@@ -974,6 +978,10 @@ def test_retailer_search_job_lifecycle_through_the_api(client):
 
 
 def test_retailer_search_job_claim_is_empty_when_nothing_is_queued(client):
+    initial = client.post("/api/retailer-search-jobs/claim").json()
+    assert initial["trigger"] == "initial"
+    client.post(f"/api/retailer-search-jobs/{initial['id']}/complete",
+                json={"status": "DONE", "result": '{"retailers": []}'})
     assert client.post("/api/retailer-search-jobs/claim").json() is None
 
 

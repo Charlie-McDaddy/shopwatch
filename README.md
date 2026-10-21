@@ -965,6 +965,18 @@ journalctl -u shopwatch-scheduler.service -n 50 # proves it ran
 
 ## Alerts (ntfy)
 
+Each product's page has a target-price setting and an optional best-price-drop watch.
+Either can be used alone. Drop watches start with the first confirmed comparable
+delivered price, then notify on a further improvement of the chosen minimum amount.
+Unknown freight, unavailable offers and unconfirmed conditional discounts cannot
+establish that price. Changes to location, pack quantity or discount eligibility reset
+the comparison baseline rather than claiming a retailer price reduction.
+
+The product page retains alert history, including delivery failures. Pausing or
+archiving a product suppresses its alerts; recording a purchase keeps it watched.
+Repeated prices are suppressed across restarts. Saving explicit product preferences
+replaces its legacy target rules; purchase price-protection checks still apply.
+
 ```dotenv
 SHOPWATCH_NTFY_URL=https://ntfy.example.com/shopwatch
 SHOPWATCH_NTFY_TOKEN=tk_...          # omit for an unauthenticated topic
@@ -976,6 +988,16 @@ SHOPWATCH_ALERTS_ENABLED=true
 Console output always happens. A delivery failure is printed as `[ALERT-FAILURE]`, logged
 at ERROR, returned in the run summary, and makes the CLI exit non-zero. An ntfy 2xx means
 ntfy accepted the publish, not that a device displayed it.
+
+Seller discovery starts when a product is added, recurs weekly independently of its
+price-check cadence, and can be requested using **Find more shops** on the product
+page. The existing host research runner must be running to process these jobs.
+Discovery shows queued/running/completed/failed status and sourced candidates.
+An exact-model public product page can become an unverified listing with no price;
+a search result is not a verified current offer. Existing listings and manual values
+are preserved. Paused or archived products do not start automatic discovery, and
+late results cannot reactivate them. Snapshot exports retain alert preferences,
+alert history and discovery dates; running discovery jobs are not replayed on import.
 
 Rules live in the `alert_rules` table, one row per rule:
 

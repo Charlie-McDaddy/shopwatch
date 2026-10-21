@@ -401,6 +401,80 @@ wire('btn-watch-product', async event => {
   await runWatch(event.currentTarget, { product_id: Number(event.currentTarget.dataset.product) });
 });
 
+async function pollSellerDiscovery(jobId) {
+  const panel = document.getElementById('seller-discovery');
+  if (!panel) return;
+  const status = document.getElementById('seller-discovery-status');
+  const results = document.getElementById('seller-discovery-results');
+  for (let attempt = 0; attempt < 90; attempt++) {
+    try {
+      const job = await api(`/api/retailer-search-jobs/${jobId}`);
+      if (panel.dataset.job !== String(jobId)) return;
+      status.textContent = job.status === 'FAILED'
+        ? `Discovery failed: ${job.error || 'Search could not be completed.'}`
+        : `${job.status === 'DONE' ? 'Discovery complete' : 'Searching for shops…'}`;
+      if (job.status === 'DONE') {
+        results.replaceChildren();
+        const candidates = JSON.parse(job.result || '{}').retailers || [];
+        if (!candidates.length) results.textContent = 'No additional sellers found.';
+        for (const candidate of candidates) {
+          const row = document.createElement('p');
+          if (candidate.source_url) {
+            const source = document.createElement('a');
+            source.href = candidate.source_url;
+            source.rel = 'noopener';
+            source.textContent = candidate.name;
+            row.appendChild(source);
+            if (candidate.source_title) row.append(` — ${candidate.source_title}`);
+          } else {
+            row.textContent = `${candidate.name} (needs review; no exact-model page found)`;
+          }
+          if (candidate.needs_review) row.append(' (needs review; add the exact marketplace seller using Add from a URL)');
+          if (candidate.homepage) {
+            const shop = document.createElement('a');
+            shop.href = candidate.homepage;
+            shop.rel = 'noopener';
+            shop.textContent = 'shop';
+            row.append(' · ', shop);
+          }
+          results.appendChild(row);
+        }
+        setTimeout(() => location.reload(), 700);
+        return;
+      }
+      if (job.status === 'FAILED') return;
+    } catch (err) {
+      status.textContent = `Could not read discovery status: ${err.message}`;
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  status.textContent = 'Search is taking longer than expected. Refresh to check its status.';
+}
+
+wire('btn-discover-sellers', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const panel = document.getElementById('seller-discovery');
+  const status = document.getElementById('seller-discovery-status');
+  status.textContent = 'Starting seller discovery…';
+  try {
+    const job = await api(`/api/products/${button.dataset.product}/discover-retailers`, { method: 'POST' });
+    panel.dataset.job = String(job.id);
+    status.textContent = 'Searching for shops…';
+    pollSellerDiscovery(job.id);
+  } catch (err) {
+    status.textContent = `Could not start discovery: ${err.message}`;
+    button.disabled = false;
+  }
+});
+
+const sellerDiscoveryPanel = document.getElementById('seller-discovery');
+if (sellerDiscoveryPanel?.dataset.job) {
+  const jobStatus = document.getElementById('seller-discovery-status')?.textContent || '';
+  if (/queued|running/i.test(jobStatus)) pollSellerDiscovery(sellerDiscoveryPanel.dataset.job);
+}
+
 async function runWatch(button, body) {
   button.disabled = true;
   const label = button.textContent;
@@ -464,6 +538,22 @@ wire('btn-dry-alerts', async () => {
       toast(`${alert.rule}: ${alert.retailer} ${money(alert.delivered)} (${alert.classification})`, 'good');
     }
   } catch (err) { toast(`Evaluate failed: ${err.message}`, 'bad'); }
+});
+
+document.getElementById('product-alert-settings')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const rawTarget = document.getElementById('alert-target').value;
+  const payload = {
+    target_price: rawTarget === '' ? null : Number(rawTarget),
+    drop_enabled: document.getElementById('alert-drop-enabled').checked,
+    drop_min_change: Number(document.getElementById('alert-drop-min').value),
+  };
+  try {
+    await api(`/api/products/${form.dataset.product}/alerts`, { method: 'PUT', body: payload });
+    toast('Alert settings saved.', 'good');
+    location.reload();
+  } catch (err) { toast(`Could not save alert settings: ${err.message}`, 'bad'); }
 });
 
 /* ------------------------------------------------------------------ dialogs */

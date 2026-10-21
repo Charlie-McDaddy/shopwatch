@@ -292,6 +292,8 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
         wayback_evidence, wayback_coverage = wayback.history(conn, product_id)
         rules = [dict(r) for r in conn.execute(
             "SELECT * FROM alert_rules WHERE product_id = ?", (product_id,))]
+        alert_preferences = alerts.get_preferences(conn, product_id)
+        alert_history = alerts.get_alert_history(conn, product_id, limit=25)
         cats = store.categories(conn)
         household_settings = store.household_settings(conn)
     return templates.TemplateResponse(
@@ -307,6 +309,8 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
             "buying_advice": advice.assess(product, history, wayback_evidence, date.today()),
             "wayback_coverage": wayback_coverage,
             "rules": rules,
+            "alert_preferences": alert_preferences,
+            "alert_history": alert_history,
             "categories": cats,
             "sort": sort,
             "classes": pricing.CLASS_LABELS,
@@ -644,6 +648,37 @@ def api_product(product_id: int, sort: str = "delivered") -> Any:
         if product is None:
             raise HTTPException(404, "no such product")
         return jsonable(product)
+
+
+@app.get("/api/products/{product_id}/alerts")
+def api_product_alerts(product_id: int) -> Any:
+    with session() as conn:
+        if store.get_product(conn, product_id) is None:
+            raise HTTPException(404, "no such product")
+        preferences = alerts.get_preferences(conn, product_id)
+        history = alerts.get_alert_history(conn, product_id, limit=100)
+    return {
+        "preferences": {
+            key: preferences[key]
+            for key in ("product_id", "target_price", "drop_enabled", "drop_min_change")
+        },
+        "history": history,
+    }
+
+
+@app.put("/api/products/{product_id}/alerts")
+def api_update_product_alerts(product_id: int, payload: dict = Body(...)) -> Any:
+    with session() as conn:
+        if store.get_product(conn, product_id) is None:
+            raise HTTPException(404, "no such product")
+        try:
+            preferences = alerts.update_preferences(conn, product_id, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return {
+        key: preferences[key]
+        for key in ("product_id", "target_price", "drop_enabled", "drop_min_change")
+    }
 
 
 @app.patch("/api/products/{product_id}")
@@ -1514,6 +1549,16 @@ def api_complete_llm_job(job_id: int, payload: dict = Body(...)) -> Any:
 # Same shape as the llm jobs block above, one queue down: a live web search rather than
 # an LLM's own knowledge, claimed by the host-level research runner on opti rather than
 # a user's own machine - see app/retailer_search.py's module docstring for why.
+
+
+@app.post("/api/products/{product_id}/discover-retailers", status_code=202)
+def api_discover_product_retailers(product_id: int) -> Any:
+    with session() as conn:
+        try:
+            job_id = retailer_search.request_product_discovery(conn, product_id)
+        except ValueError as exc:
+            raise HTTPException(409 if "inactive" in str(exc) else 404, str(exc)) from exc
+        return jsonable(retailer_search.get_job(conn, job_id))
 
 
 @app.post("/api/retailer-search-jobs", status_code=202)

@@ -172,20 +172,24 @@ def _fake_search_response(monkeypatch, data, success=True):
 
 def test_discover_retailers_returns_candidates_from_search_results(monkeypatch):
     _fake_search_response(monkeypatch, [
-        {"url": "https://www.newstore.example/product", "title": "Soundbar | New Store"},
+        {"url": "https://www.newstore.example/product", "title": "HW-Q930H Soundbar | New Store"},
     ])
     result = research_runner.discover_retailers(
         "http://firecrawl", "Samsung Soundbar", "HW-Q930H", [], [],
     )
-    assert result["retailers"] == [{"name": "New Store", "homepage": "https://newstore.example"}]
+    assert result["retailers"] == [{
+        "name": "New Store", "homepage": "https://newstore.example",
+        "source_url": "https://www.newstore.example/product",
+        "source_title": "HW-Q930H Soundbar | New Store",
+    }]
 
 
 def test_discover_retailers_excludes_by_homepage_domain(monkeypatch):
     """The control this test exists for: without domain-based exclusion, a retailer
     already selected for this product would be suggested again as if it were new."""
     _fake_search_response(monkeypatch, [
-        {"url": "https://www.knownstore.example/product", "title": "Soundbar | Known Store"},
-        {"url": "https://www.newstore.example/product", "title": "Soundbar | New Store"},
+        {"url": "https://www.knownstore.example/product", "title": "HW-Q930H Soundbar | Known Store"},
+        {"url": "https://www.newstore.example/product", "title": "HW-Q930H Soundbar | New Store"},
     ])
     result = research_runner.discover_retailers(
         "http://firecrawl", "Samsung Soundbar", "HW-Q930H",
@@ -198,7 +202,7 @@ def test_discover_retailers_excludes_by_homepage_domain(monkeypatch):
 
 def test_discover_retailers_excludes_by_name(monkeypatch):
     _fake_search_response(monkeypatch, [
-        {"url": "https://www.newstore.example/product", "title": "Soundbar | New Store"},
+        {"url": "https://www.newstore.example/product", "title": "HW-Q930H Soundbar | New Store"},
     ])
     result = research_runner.discover_retailers(
         "http://firecrawl", "Samsung Soundbar", "HW-Q930H", ["New Store"], [],
@@ -206,10 +210,20 @@ def test_discover_retailers_excludes_by_name(monkeypatch):
     assert result["retailers"] == []
 
 
+def test_discover_retailers_requires_the_complete_variant_model(monkeypatch):
+    _fake_search_response(monkeypatch, [
+        {"url": "https://www.newstore.example/product", "title": "HW-Q930H/XU Soundbar | New Store"},
+    ])
+    result = research_runner.discover_retailers(
+        "http://firecrawl", "Samsung Soundbar", "HW-Q930H/XY", [], [],
+    )
+    assert result["retailers"] == []
+
+
 def test_discover_retailers_deduplicates_the_same_domain(monkeypatch):
     _fake_search_response(monkeypatch, [
-        {"url": "https://www.newstore.example/a", "title": "Soundbar | New Store"},
-        {"url": "https://www.newstore.example/b", "title": "Soundbar A/V | New Store"},
+        {"url": "https://www.newstore.example/a", "title": "HW-Q930H Soundbar | New Store"},
+        {"url": "https://www.newstore.example/b", "title": "HW-Q930H Soundbar A/V | New Store"},
     ])
     result = research_runner.discover_retailers(
         "http://firecrawl", "Samsung Soundbar", "HW-Q930H", [], [],
@@ -219,7 +233,7 @@ def test_discover_retailers_deduplicates_the_same_domain(monkeypatch):
 
 def test_discover_retailers_excludes_by_homepage_domain_regardless_of_case(monkeypatch):
     _fake_search_response(monkeypatch, [
-        {"url": "https://WWW.KnownStore.example/product", "title": "Soundbar | Known Store"},
+        {"url": "https://WWW.KnownStore.example/product", "title": "HW-Q930H Soundbar | Known Store"},
     ])
     result = research_runner.discover_retailers(
         "http://firecrawl", "Samsung Soundbar", "HW-Q930H",
