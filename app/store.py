@@ -292,6 +292,9 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
     # (a wizard step, an import) but no targets typed in - the ordinary PATCH path
     # below is not the only way a product can start life with a low and no targets.
     maybe_derive_price_targets(conn, product_id)
+    if not payload.get("archived") and payload.get("status", "ACTIVE") in {"ACTIVE", "PURCHASED"}:
+        from . import retailer_search
+        retailer_search.request_product_discovery(conn, product_id, trigger="initial")
     return product_id
 
 
@@ -550,6 +553,25 @@ def product_view(
                 local = instant.astimezone(zone)
                 schedule[key.replace("_at", "_local")] = local.strftime("%d %b %Y %H:%M")
     product["check_schedule"] = schedule
+    discovery_schedule = conn.execute(
+        "SELECT next_due_at, last_attempt_at, last_error FROM product_discovery_schedules"
+        " WHERE product_id = ?", (product_id,)
+    ).fetchone()
+    product["discovery_schedule"] = dict(discovery_schedule) if discovery_schedule else None
+    discovery_job = conn.execute(
+        "SELECT id, status, trigger, result, error, requested_at, finished_at"
+        " FROM retailer_search_jobs WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+        (product_id,),
+    ).fetchone()
+    if discovery_job:
+        discovery_job = dict(discovery_job)
+        try:
+            discovery_job["result"] = json.loads(discovery_job["result"] or "{}")
+        except (TypeError, ValueError):
+            discovery_job["result"] = {}
+        if not isinstance(discovery_job["result"], dict):
+            discovery_job["result"] = {}
+    product["discovery_job"] = discovery_job
     product["specs"] = json.loads(product.pop("specs_json") or "{}")
     product["components"] = json.loads(product.pop("components_json") or "{}")
     listings = listings_for_product(conn, product, sort=sort)

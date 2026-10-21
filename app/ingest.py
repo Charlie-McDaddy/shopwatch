@@ -12,6 +12,7 @@ Both paths obey the same rule: a manually locked field is never overwritten.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -208,12 +209,19 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
         "alert_rules": rows("SELECT * FROM alert_rules ORDER BY id"),
         "category_specifications": rows("SELECT * FROM category_specifications ORDER BY id"),
         "household_settings": store.household_settings(conn),
+        "product_alert_preferences": rows(
+            "SELECT * FROM product_alert_preferences ORDER BY product_id"
+        ),
+        "product_discovery_schedules": rows(
+            "SELECT * FROM product_discovery_schedules ORDER BY product_id"
+        ),
         "product_check_schedules": rows(
             "SELECT product_id, cadence, last_attempt_at, last_success_at, next_due_at,"
             " failures, last_error FROM product_check_schedules ORDER BY product_id"
         ),
     }
     if include_history:
+        data["alert_history"] = rows("SELECT * FROM alert_history ORDER BY id")
         data["price_history"] = rows("SELECT * FROM price_history ORDER BY id")
         data["wayback_checks"] = rows("SELECT * FROM wayback_checks ORDER BY id")
         data["wayback_price_evidence"] = rows(
@@ -248,6 +256,13 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
     History rows are appended, de-duplicated on (listing, timestamp, price).
     """
     report = {"products": 0, "listings": 0, "history": 0, "preserved_manual": 0, "errors": []}
+    watch_sections = {}
+    for key in ("product_alert_preferences", "product_discovery_schedules", "alert_history"):
+        rows = data.get(key, [])
+        if not isinstance(rows, list):
+            report["errors"].append(f"{key}: expected a list")
+            rows = []
+        watch_sections[key] = rows
 
     if isinstance(data.get("household_settings"), Mapping):
         try:
@@ -334,6 +349,61 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
                      last_error[:500] if last_error is not None else None, product_id),
                 )
 
+    for preference in watch_sections["product_alert_preferences"]:
+        try:
+            pid = product_ids.get(preference.get("product_id"))
+            if pid is None:
+                raise ValueError("unknown product")
+            target = preference.get("target_price")
+            minimum = preference.get("drop_min_change", 20)
+            enabled = preference.get("drop_enabled", 0)
+            target_fired = preference.get("target_last_fired_price")
+            drop_fired = preference.get("drop_last_fired_price")
+            above = preference.get("target_above_target", 0)
+            for value in (target, minimum, target_fired, drop_fired):
+                if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                ):
+                    raise ValueError("prices must be finite non-negative numbers")
+            if minimum is None or enabled not in (0, 1) or above not in (0, 1):
+                raise ValueError("invalid drop preferences")
+            # A restored database may map listings to new IDs; establish a fresh
+            # comparable baseline on its next check rather than copying a stale hash.
+            conn.execute(
+                "INSERT INTO product_alert_preferences"
+                " (product_id, target_price, drop_enabled, drop_min_change) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(product_id) DO UPDATE SET target_price = excluded.target_price,"
+                " drop_enabled = excluded.drop_enabled, drop_min_change = excluded.drop_min_change,"
+                " drop_baseline_price = NULL, drop_baseline_context = NULL",
+                (pid, target, int(enabled), minimum),
+            )
+            conn.execute(
+                "UPDATE product_alert_preferences SET target_last_fired_price = ?,"
+                " drop_last_fired_price = ?, target_above_target = ? WHERE product_id = ?",
+                (target_fired, drop_fired, int(above), pid),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            report["errors"].append(f"product_alert_preferences: {exc}")
+
+    for schedule in watch_sections["product_discovery_schedules"]:
+        try:
+            pid = product_ids.get(schedule.get("product_id"))
+            if pid is None:
+                raise ValueError("unknown product")
+            due = _snapshot_schedule_timestamp(schedule.get("next_due_at"))
+            attempted = _snapshot_schedule_timestamp(schedule.get("last_attempt_at"), optional=True)
+            error = schedule.get("last_error")
+            if error is not None and not isinstance(error, str):
+                raise ValueError("last_error must be text or null")
+            conn.execute(
+                "UPDATE product_discovery_schedules SET next_due_at = ?, last_attempt_at = ?,"
+                " last_error = ? WHERE product_id = ?",
+                (due, attempted, error[:500] if error else None, pid),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            report["errors"].append(f"product_discovery_schedules: {exc}")
+
     prov_index: dict[tuple[Any, str], dict[str, Any]] = {
         (p["listing_id"], p["field"]): p for p in data.get("field_provenance", [])
     }
@@ -402,6 +472,47 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
             provenance.set_verification(
                 conn, lid, ver["aspect"], ver.get("status", "UNVERIFIED"), ver.get("note")
             )
+
+    for event in watch_sections["alert_history"]:
+        try:
+            pid = product_ids.get(event.get("product_id"))
+            if pid is None:
+                raise ValueError("unknown product")
+            price = event.get("delivered_price")
+            if (isinstance(price, bool) or not isinstance(price, (int, float))
+                    or not math.isfinite(price) or price < 0):
+                raise ValueError("invalid delivered price")
+            status = event.get("delivery_status")
+            if status not in {"accepted", "failed", "not_sent"}:
+                raise ValueError("invalid delivery status")
+            created = _snapshot_schedule_timestamp(event.get("created_at"))
+            fields = ("rule_name", "retailer", "classification", "reason", "payload")
+            if any(not isinstance(event.get(field), str) for field in fields):
+                raise ValueError("invalid alert text")
+            error = event.get("delivery_error")
+            if error is not None and not isinstance(error, str):
+                raise ValueError("invalid delivery error")
+            lid = listing_ids.get(event.get("listing_id"))
+            payload = json.loads(event["payload"])
+            if not isinstance(payload, dict):
+                raise ValueError("invalid alert payload")
+            payload["listing_id"] = lid
+            duplicate = conn.execute(
+                "SELECT 1 FROM alert_history WHERE product_id = ? AND created_at = ?"
+                " AND rule_name = ? AND retailer = ? AND delivered_price = ?",
+                (pid, created, event["rule_name"], event["retailer"], price),
+            ).fetchone()
+            if not duplicate:
+                conn.execute(
+                    "INSERT INTO alert_history (product_id, listing_id, rule_name, delivered_price,"
+                    " retailer, classification, reason, delivery_status, delivery_error, payload,"
+                    " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (pid, lid, event["rule_name"], price, event["retailer"],
+                     event["classification"], event["reason"], status, error,
+                     json.dumps(payload), created),
+                )
+        except (AttributeError, TypeError, ValueError) as exc:
+            report["errors"].append(f"alert_history: {exc}")
 
     price_change_reasons = {
         "INITIAL", "CONTEXT_CHANGED", "RETAILER_PRICE_REDUCTION",

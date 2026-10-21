@@ -203,6 +203,14 @@ def run(
                 provenance.mark_stale(conn, listing["id"], config.stale_after_days)
             )
 
+        # Baselines are refreshed after the complete check pass, including no-send runs;
+        # the standalone dry-evaluation endpoint remains read-only.
+        product_ids = {listing["product_id"] for listing in listings}
+        for watched_product_id in product_ids:
+            view = store.product_view(conn, watched_product_id)
+            if view:
+                alerts.refresh_drop_baseline(conn, view)
+
         attempted = summary["checked"] - summary["skipped"]
         if attempted and summary["errors"] == attempted:
             status = "failed"

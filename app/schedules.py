@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import price_watch
+from . import price_watch, retailer_search
 from .db import db_path, migrate, session
 
 CADENCES = {"daily", "twice_weekly", "weekly", "monthly"}
@@ -184,6 +184,7 @@ def run_due(now: datetime | None = None) -> dict:
     now = now or datetime.now(UTC)
     migrate()
     with session() as conn:
+        discovery_jobs = retailer_search.queue_due(conn, _stamp(now))
         due_ids = [r["product_id"] for r in conn.execute(
             "SELECT s.product_id FROM product_check_schedules s JOIN products p"
             " ON p.id = s.product_id WHERE datetime(s.next_due_at) <= datetime(?)"
@@ -202,7 +203,8 @@ def run_due(now: datetime | None = None) -> dict:
                 result = {"errors": 1, "status": "failed", "error": str(exc)}
             _finish(product_id, now, result)
             results.append({"product_id": product_id, **result})
-    return {"checked_products": len(results), "results": results}
+    return {"checked_products": len(results), "results": results,
+            "discovery_jobs_queued": len(discovery_jobs)}
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@
   <button id="btn-add-listing-url">Add from a URL (auto-check price)</button>
   {% if not product.archived and product.status != 'PARKED' %}
     <button id="btn-watch-product" data-product="{{ product.id }}">Check prices now</button>
+    <button id="btn-discover-sellers" data-product="{{ product.id }}">Find more shops</button>
     <button id="btn-research-retailers" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research retailers again</button>
     <button id="btn-research-historical-low" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research historical low</button>
   {% endif %}
@@ -55,6 +56,31 @@
     <div class="wide">
       <button type="button" id="save-check-cadence">Save schedule</button>
     </div>
+  </div>
+</section>
+
+<section class="panel" id="seller-discovery" data-product="{{ product.id }}"
+         data-job="{{ product.discovery_job.id if product.discovery_job else '' }}">
+  <h3>Seller discovery</h3>
+  <p class="muted small">Runs weekly regardless of the price-check schedule. Search results never supply a confirmed price.</p>
+  <p id="seller-discovery-status" class="muted" aria-live="polite">
+    {% if product.discovery_job %}
+      {{ product.discovery_job.status|lower|capitalize }} discovery
+      {% if product.discovery_job.error %}: {{ product.discovery_job.error }}{% endif %}
+    {% else %}No discovery run yet.{% endif %}
+  </p>
+  <div id="seller-discovery-results">
+    {% if product.discovery_job and product.discovery_job.result %}
+      {% for candidate in product.discovery_job.result.retailers or [] %}
+        <p>
+          {% if candidate.source_url %}<a href="{{ candidate.source_url }}" rel="noopener">{{ candidate.name }}</a>
+            {% if candidate.source_title %}<span class="muted"> — {{ candidate.source_title }}</span>{% endif %}
+          {% else %}{{ candidate.name }} <span class="muted">(needs review; no exact-model page found)</span>{% endif %}
+          {% if candidate.needs_review %}<span class="muted">(needs review; add the exact marketplace seller using Add from a URL)</span>{% endif %}
+          {% if candidate.homepage %}<span class="muted"> · <a href="{{ candidate.homepage }}" rel="noopener">shop</a></span>{% endif %}
+        </p>
+      {% else %}<p class="muted">No additional sellers found.</p>{% endfor %}
+    {% endif %}
   </div>
 </section>
 
@@ -178,6 +204,21 @@
 
   <div class="panel">
     <h3>When you will be told</h3>
+    <form id="product-alert-settings" data-product="{{ product.id }}">
+      <label for="alert-target">Target delivered price (AUD; blank disables)</label>
+      <input id="alert-target" name="target_price" type="number" min="0" step="0.01"
+             value="{{ alert_preferences.target_price if alert_preferences.target_price is not none else '' }}">
+      <label style="display:flex;gap:8px;align-items:center;margin:10px 0">
+        <input id="alert-drop-enabled" type="checkbox" {% if alert_preferences.drop_enabled %}checked{% endif %}>
+        Also alert on a worthwhile further price drop
+      </label>
+      <label for="alert-drop-min">Minimum drop (AUD)</label>
+      <input id="alert-drop-min" type="number" min="0" step="0.01"
+             value="{{ alert_preferences.drop_min_change }}">
+      <button type="submit">Save alert settings</button>
+    </form>
+    <p class="small muted">ntfy status records whether the service accepted a message. It cannot confirm a device displayed it.</p>
+    {% if alert_preferences.updated_at is not defined %}
     {% for r in rules %}
       <p style="margin:0 0 10px">
         <b>{{ r.name }}</b>{% if not r.enabled %} <span class="tag">off</span>{% endif %}<br>
@@ -186,7 +227,17 @@
         {% if r.last_fired_at %}Last sent {{ r.last_fired_at|dt }}.{% else %}Never sent.{% endif %}</span>
       </p>
     {% else %}<p class="muted small" style="margin:0">No alert rules on this product.</p>{% endfor %}
+    {% endif %}
     <button id="btn-dry-alerts">What would be sent right now?</button>
+    <h4>Alert history</h4>
+    {% for item in alert_history %}
+      <p class="small" style="margin:0 0 8px">
+        <b>{{ item.rule_name }}</b> — {{ item.retailer }} {{ item.delivered_price|money }}
+        <span class="tag">{{ item.delivery_status }}</span><br>
+        <span class="muted">{{ item.created_at|dt }} · {{ item.reason }}</span>
+        {% if item.delivery_error %}<br><span class="bad small">{{ item.delivery_error }}</span>{% endif %}
+      </p>
+    {% else %}<p class="muted small">No alerts recorded yet.</p>{% endfor %}
   </div>
 </div>
 
