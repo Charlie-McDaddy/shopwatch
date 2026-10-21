@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import research, store
+from app import provenance, research, store
 
 
 @pytest.fixture()
@@ -77,9 +77,16 @@ def test_group_view_best_is_the_cheapest_non_ruled_out_point(conn, two_candidate
     la = store.create_listing(conn, {
         "product_id": a, "retailer_id": retailer["id"], "advertised_price": 500,
     })
-    store.create_listing(conn, {
+    lb = store.create_listing(conn, {
         "product_id": b, "retailer_id": retailer["id"], "advertised_price": 749,
     })
+    for listing_id, product_id in ((la, a), (lb, b)):
+        provenance.apply_values(conn, listing_id, {
+            "model_on_page": store.get_product(conn, product_id)["model"],
+            "stock_status": "In Stock", "freight": 0,
+        }, state=provenance.MANUAL)
+        for aspect in ("model", "price", "stock"):
+            provenance.set_verification(conn, listing_id, aspect, provenance.VERIFIED)
     conn.commit()
 
     group = store.group_view(conn, group_id)

@@ -118,7 +118,26 @@ def test_batch_import_reports_failures_without_losing_the_good_rows(seeded):
 
 def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatch):
     with connect(seeded) as conn:
-        store.update_household_settings(conn, {"postcode": "4000", "pickup_radius_km": 40})
+        store.update_household_settings(
+            conn, {"postcode": "4000", "pickup_radius_km": 40, "timezone": "Pacific/Auckland"}
+        )
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        store.update_product(conn, product["id"], {"buying_mode": "buy_asap"})
+        conn.execute(
+            "INSERT INTO price_history (product_id, observed_at, advertised_price, source,"
+            " price_context, price_change_reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (product["id"], "2026-10-20T12:00:00Z", 888, "https://source.example/",
+             '{"postcode":"4000","condition":"NEW"}', "INITIAL"),
+        )
+        conn.execute(
+            "UPDATE product_check_schedules SET cadence = 'twice_weekly',"
+            " last_attempt_at = '2026-10-19T21:00:00Z',"
+            " last_success_at = '2026-10-19T21:01:00Z',"
+            " next_due_at = '2026-10-22T21:00:00Z', failures = 2,"
+            " last_error = 'one retailer timed out', locked_until = '2026-10-21T21:30:00Z'"
+            " WHERE product_id = ?",
+            (product["id"],),
+        )
         listing = conn.execute(
             "SELECT id FROM listings ORDER BY id LIMIT 1"
         ).fetchone()
@@ -128,7 +147,17 @@ def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatc
         )
         snapshot = ingest.export_all(conn)
     assert snapshot["format"] == "shopwatch-snapshot"
-    assert snapshot["household_settings"] == {"postcode": "4000", "pickup_radius_km": 40}
+    assert snapshot["household_settings"] == {
+        "postcode": "4000", "pickup_radius_km": 40, "timezone": "Pacific/Auckland"
+    }
+    schedule_snapshot = next(
+        item for item in snapshot["product_check_schedules"]
+        if item["product_id"] == product["id"]
+    )
+    assert "locked_until" not in schedule_snapshot
+    assert schedule_snapshot["cadence"] == "twice_weekly"
+    # Even a hand-edited snapshot cannot reactivate an old worker lease.
+    schedule_snapshot["locked_until"] = "2026-10-21T21:30:00Z"
     exported_listing = next(row for row in snapshot["listings"] if row["id"] == listing["id"])
     assert exported_listing["freight_postcode"] == "4000"
     assert exported_listing["pickup_postcode"] == "4000"
@@ -140,13 +169,38 @@ def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatc
     monkeypatch.setenv("SHOPWATCH_DB", str(target))
     migrate(target)
     with connect(target) as conn:
+        store.create_product(conn, {"name": "Existing target", "model": "OTHER-MODEL"})
         report = ingest.import_snapshot(conn, snapshot)
         conn.commit()
         product = store.product_by_model(conn, "HW-Q930H/XY")
         assert product is not None
+        source_product_id = next(
+            row["id"] for row in snapshot["products"] if row["model"] == "HW-Q930H/XY"
+        )
+        assert product["id"] != source_product_id
         view = store.product_view(conn, product["id"])
         assert report["products"] == 1
-        assert store.household_settings(conn) == {"postcode": "4000", "pickup_radius_km": 40}
+        assert store.household_settings(conn) == {
+            "postcode": "4000", "pickup_radius_km": 40, "timezone": "Pacific/Auckland"
+        }
+        assert product["buying_mode"] == "buy_asap"
+        restored_history = conn.execute(
+            "SELECT price_context, price_change_reason FROM price_history"
+            " WHERE product_id = ? AND observed_at = ?",
+            (product["id"], "2026-10-20T12:00:00Z"),
+        ).fetchone()
+        assert tuple(restored_history) == (
+            '{"postcode":"4000","condition":"NEW"}', "INITIAL",
+        )
+        restored_schedule = conn.execute(
+            "SELECT cadence, last_attempt_at, last_success_at, next_due_at, failures,"
+            " last_error, locked_until FROM product_check_schedules WHERE product_id = ?",
+            (product["id"],),
+        ).fetchone()
+        assert tuple(restored_schedule) == (
+            "twice_weekly", "2026-10-19T21:00:00Z", "2026-10-19T21:01:00Z",
+            "2026-10-22T21:00:00Z", 2, "one retailer timed out", None,
+        )
         restored_listing = conn.execute(
             "SELECT freight, freight_postcode, pickup_postcode FROM listings WHERE product_id = ? ORDER BY id LIMIT 1",
             (product["id"],),
@@ -386,3 +440,57 @@ def test_imported_freight_does_not_claim_the_household_postcode(seeded):
         assert imported["delivered_resolved"] is False
         assert history["freight_resolved"] == 0
         assert store.get_product(conn, product["id"])["lowest_known_price"] == known_low_before
+
+
+def test_snapshot_without_schedule_data_preserves_existing_schedule(seeded):
+    with connect(seeded) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        conn.execute(
+            "UPDATE product_check_schedules SET cadence = 'daily',"
+            " next_due_at = '2030-01-01T00:00:00Z' WHERE product_id = ?",
+            (product["id"],),
+        )
+        before = tuple(conn.execute(
+            "SELECT cadence, next_due_at FROM product_check_schedules WHERE product_id = ?",
+            (product["id"],),
+        ).fetchone())
+        legacy_snapshot = {"products": [dict(product)], "retailers": []}
+        ingest.import_snapshot(conn, legacy_snapshot)
+        after = tuple(conn.execute(
+            "SELECT cadence, next_due_at FROM product_check_schedules WHERE product_id = ?",
+            (product["id"],),
+        ).fetchone())
+    assert after == before
+
+
+def test_snapshot_schedule_rejects_invalid_cadence_timestamp_and_counter(seeded):
+    with connect(seeded) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        product_snapshot = dict(product)
+        schedule = dict(conn.execute(
+            "SELECT product_id, cadence, last_attempt_at, last_success_at, next_due_at,"
+            " failures, last_error FROM product_check_schedules WHERE product_id = ?",
+            (product["id"],),
+        ).fetchone())
+        conn.execute(
+            "UPDATE product_check_schedules SET cadence = 'monthly',"
+            " next_due_at = '2030-01-01T00:00:00Z', failures = 3 WHERE product_id = ?",
+            (product["id"],),
+        )
+        before = tuple(conn.execute(
+            "SELECT cadence, next_due_at, failures FROM product_check_schedules"
+            " WHERE product_id = ?", (product["id"],),
+        ).fetchone())
+        for field, invalid in (("cadence", "hourly"), ("next_due_at", "tomorrow"), ("next_due_at", "2026-10-21"), ("failures", -1)):
+            broken = dict(schedule)
+            broken[field] = invalid
+            report = ingest.import_snapshot(conn, {
+                "products": [product_snapshot], "retailers": [],
+                "product_check_schedules": [broken],
+            })
+            assert report["errors"]
+        after = tuple(conn.execute(
+            "SELECT cadence, next_due_at, failures FROM product_check_schedules"
+            " WHERE product_id = ?", (product["id"],),
+        ).fetchone())
+    assert after == before

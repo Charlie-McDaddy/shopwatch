@@ -245,9 +245,24 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     migrate()
-    summary = run(
-        product_id=args.product, trigger=args.trigger, send_alerts=not args.no_alerts
-    )
+    # Import at call time: schedules imports this module's run function.
+    from . import schedules
+
+    if args.product is None:
+        summary = schedules.check_all_now(
+            trigger=args.trigger, send_alerts=not args.no_alerts
+        )
+    else:
+        try:
+            summary = schedules.check_now(
+                args.product, trigger=args.trigger, send_alerts=not args.no_alerts
+            )
+        except ValueError as exc:
+            summary = {
+                "run_id": None, "checked": 0, "ok": 0, "unresolved": 0,
+                "skipped": 0, "errors": 1, "stale_marked": 0, "alerts": [],
+                "delivery_failures": [], "status": "failed", "error": str(exc),
+            }
 
     if args.json:
         print(json.dumps(summary, indent=2, default=str))

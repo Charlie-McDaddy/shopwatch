@@ -22,17 +22,18 @@ from markupsafe import Markup, escape
 
 from . import (
     __version__,
+    advice,
     alerts,
     ingest,
     llm_jobs,
     mailwatch,
     offers,
-    price_watch,
     pricing,
     provenance,
     research,
     retailer_search,
     retailers,
+    schedules,
     store,
     url_intake,
     wayback,
@@ -303,6 +304,7 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
             "household_settings": household_settings,
             "history": history,
             "wayback_evidence": wayback_evidence,
+            "buying_advice": advice.assess(product, history, wayback_evidence, date.today()),
             "wayback_coverage": wayback_coverage,
             "rules": rules,
             "categories": cats,
@@ -939,6 +941,10 @@ def api_update_listing(listing_id: int, payload: dict = Body(...)) -> Any:
     manual = payload.pop("manual", True)
     source = payload.pop("source", "ui")
     record = payload.pop("record_history", True)
+    if not manual and payload.get("eligibility_confirmed") not in (
+        None, False, 0, "0", "false", "FALSE", "no", "NO",
+    ):
+        raise HTTPException(400, "eligibility must be confirmed manually")
     values = {k: v for k, v in payload.items() if k in provenance.TRACKED_FIELDS}
     unknown = [k for k in payload if k not in provenance.TRACKED_FIELDS]
     if not values:
@@ -1180,6 +1186,7 @@ def api_price_history(product_id: int, limit: int = Query(500, le=5000)) -> Any:
     with session() as conn:
         if store.get_product(conn, product_id) is None:
             raise HTTPException(404, "no such product")
+        # Keep unknown legacy context visible so clients cannot infer an unverified drop.
         return store.price_history(conn, product_id, limit)
 
 
@@ -1270,12 +1277,40 @@ def api_check_wayback_history(product_id: int) -> Any:
 
 @app.post("/api/price-watch/run")
 def api_price_watch(payload: dict = Body(default={})) -> Any:
-    summary = price_watch.run(
-        product_id=payload.get("product_id"),
-        trigger=payload.get("trigger", "api"),
-        send_alerts=payload.get("send_alerts", True),
-    )
+    product_id = payload.get("product_id")
+    if product_id:
+        try:
+            summary = schedules.check_now(
+                product_id, send_alerts=payload.get("send_alerts", True)
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    else:
+        summary = schedules.check_all_now(
+            send_alerts=payload.get("send_alerts", True),
+            trigger=payload.get("trigger", "api"),
+        )
     return jsonable(summary)
+
+
+@app.patch("/api/products/{product_id}/check-schedule")
+def api_update_check_schedule(product_id: int, payload: dict = Body(...)) -> Any:
+    cadence = payload.get("cadence")
+    if cadence is not None and (
+        not isinstance(cadence, str) or cadence not in schedules.CADENCES
+    ):
+        raise HTTPException(400, "unsupported check cadence")
+    with session() as conn:
+        if store.get_product(conn, product_id) is None:
+            raise HTTPException(404, "no such product")
+        if cadence is not None:
+            conn.execute(
+                "UPDATE product_check_schedules SET cadence = ? WHERE product_id = ?",
+                (cadence, product_id),
+            )
+        return dict(conn.execute(
+            "SELECT * FROM product_check_schedules WHERE product_id = ?", (product_id,)
+        ).fetchone())
 
 
 @app.get("/api/price-watch/runs")

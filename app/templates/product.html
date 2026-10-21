@@ -38,6 +38,26 @@
   <button id="btn-delete-product" data-product="{{ product.id }}" class="danger">Delete forever</button>
 {% endcall %}
 
+<section class="panel" id="check-schedule" data-product="{{ product.id }}">
+  <h3>Price checks</h3>
+  <div class="form-grid">
+    <label>Schedule
+      <select id="check-cadence">
+        {% for value, label in [('daily', 'Daily'), ('twice_weekly', 'Twice weekly'), ('weekly', 'Weekly'), ('monthly', 'Monthly')] %}
+        <option value="{{ value }}"{{ ' selected' if product.check_schedule.cadence == value else '' }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="muted small">Last attempt {{ product.check_schedule.last_attempt_local if product.check_schedule.last_attempt_at else 'never' }}.
+      Last success {{ product.check_schedule.last_success_local if product.check_schedule.last_success_at else 'never' }}.
+      Next due {{ product.check_schedule.next_due_local }} ({{ product.check_schedule.timezone }}).</p>
+    {% if product.check_schedule.last_error %}<p class="bad wide">{{ product.check_schedule.last_error }}</p>{% endif %}
+    <div class="wide">
+      <button type="button" id="save-check-cadence">Save schedule</button>
+    </div>
+  </div>
+</section>
+
 <dialog id="join-group-dialog">
   <header>Group with another candidate</header>
   <div class="body">
@@ -85,6 +105,31 @@
   </div>
 </div>
 {% endif %}
+
+<div class="panel">
+  <h3>Buying advice</h3>
+  <p>{{ buying_advice.recommendation }}</p>
+  <p class="small muted">Intent: {{ 'Buy ASAP' if buying_advice.mode == 'buy_asap' else 'Just watching' }}.
+    {{ buying_advice.uncertainty }}</p>
+  {% if buying_advice.offers %}
+  <p class="small">Confirmed eligible current offers:</p>
+  <ul class="small">{% for offer in buying_advice.offers %}
+    <li>{{ offer.retailer_name }}: {{ offer.delivered_price|money }} delivered;
+      checked {{ (offer.last_checked_at or offer.updated_at)[:10] }};
+      source {{ offer.provenance.advertised_price.source or 'recorded listing' }}{% if offer.url|safe_url %}; <a href="{{ offer.url|safe_url }}" target="_blank" rel="noopener noreferrer">source page</a>{% endif %}.</li>
+  {% endfor %}</ul>
+  {% else %}<p class="small muted">No confirmed eligible current offer is recorded.</p>{% endif %}
+  <p class="small muted">{{ buying_advice.history_limit }}</p>
+  {% if buying_advice.saved_low_signal %}<p class="small">{{ buying_advice.saved_low_signal }}</p>{% endif %}
+  {% if buying_advice.historical_signal %}<p class="small">{{ buying_advice.historical_signal }}</p>{% endif %}
+  {% if buying_advice.archive_signal %}<p class="small">{{ buying_advice.archive_signal }}</p>{% endif %}
+  {% if buying_advice.sale_dates %}
+  <p class="small">Upcoming Australian sale dates:
+    {% for event in buying_advice.sale_dates %}{{ event.name }} {{ event.date }}{% if not loop.last %}; {% endif %}{% endfor %}.
+  </p>
+  {% endif %}
+  <p class="small muted">Evidence dates and sources are shown in the price history and Wayback history below.</p>
+</div>
 
 {% if product.notes or product.fit_notes %}
 <div class="panel">
@@ -187,7 +232,7 @@
     <div class="scroll-x" style="margin-top:10px">
     <table class="plain">
       <tr><th>When</th><th>Retailer</th><th class="r">Advertised</th><th class="r">Freight</th>
-          <th class="r">Delivered</th><th>Condition</th><th>Source</th></tr>
+          <th class="r">Delivered</th><th>Condition</th><th>Comparison</th><th>Source</th></tr>
       {% for h in history %}
       <tr>
         <td class="muted">{{ h.observed_at|dt }}</td>
@@ -196,7 +241,8 @@
         <td class="r num">{% if h.freight_resolved %}{{ h.freight|money }}{% else %}<span class="unresolved">unknown</span>{% endif %}</td>
         <td class="r num"><b>{{ h.delivered_price|money }}</b></td>
         <td class="small">{{ (h.condition or '')|replace('_',' ')|capitalize }}</td>
-        <td class="small muted">{{ h.source or '' }}</td>
+        <td class="small">{{ h.price_change_label }}</td>
+        <td class="small muted">{{ h.source or '' }}{% if h.listing_url|safe_url %}<br><a href="{{ h.listing_url|safe_url }}" target="_blank" rel="noopener noreferrer">source page</a>{% endif %}</td>
       </tr>
       {% endfor %}
     </table>
@@ -337,6 +383,7 @@
       <label>Quantity unit <select id="ep-quantity_unit"><option value="">Unknown</option>{% for unit in ['g', 'kg', 'ml', 'L', 'each'] %}<option value="{{ unit }}" {% if product.quantity_unit == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}</select></label>
       <label>Worth buying? <select id="ep-verdict">{% for v in verdicts %}<option {% if v == product.verdict %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
       <label>State <select id="ep-status">{% for st in statuses %}<option {% if st == product.status %}selected{% endif %}>{{ st }}</option>{% endfor %}</select></label>
+      <label>Buying mode <select id="ep-buying_mode"><option value="just_watching" {% if product.buying_mode == 'just_watching' %}selected{% endif %}>Just watching</option><option value="buy_asap" {% if product.buying_mode == 'buy_asap' %}selected{% endif %}>Buy ASAP</option></select></label>
       <label>Buy at or under <input id="ep-trigger_price" type="number" step="0.01" value="{{ product.trigger_price or '' }}">
         <small>Delivered{% if product.trigger_price_auto %} &middot; <span class="tag" title="Filled in from the best price ever seen - shopwatch's guess, not a chosen target. Change it, or clear it back to blank, and it stops tracking.">auto</span>{% endif %}</small></label>
       <label>A good price is <input id="ep-excellent_price" type="number" step="0.01" value="{{ product.excellent_price or '' }}">

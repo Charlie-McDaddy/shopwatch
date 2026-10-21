@@ -8,9 +8,12 @@ from app.db import connect
 
 def crowdshop_listing(conn):
     product = store.product_by_model(conn, "HW-Q930H/XY")
-    return product, store.find_listing(
+    listing = store.find_listing(
         conn, product["id"], store.ensure_retailer(conn, "Crowdshop")["id"]
     )
+    for aspect in ("model", "price", "stock"):
+        provenance.set_verification(conn, listing["id"], aspect, provenance.VERIFIED)
+    return product, listing
 
 
 def test_nothing_fires_while_freight_is_unresolved(seeded):
@@ -18,6 +21,17 @@ def test_nothing_fires_while_freight_is_unresolved(seeded):
         assert alerts.evaluate_all(conn) == [], (
             "the seeded Crowdshop price is under trigger but freight is unconfirmed"
         )
+
+
+def test_unverified_import_is_not_actionable_even_after_freight_is_entered(seeded):
+    with connect(seeded) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        listing = store.find_listing(
+            conn, product["id"], store.ensure_retailer(conn, "Crowdshop")["id"]
+        )
+        provenance.set_field(conn, listing["id"], "freight", 0, state=provenance.MANUAL)
+        conn.commit()
+        assert alerts.evaluate_all(conn) == []
 
 
 def test_confirming_freight_under_trigger_fires_the_new_stock_rule(seeded):

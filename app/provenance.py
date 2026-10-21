@@ -40,6 +40,8 @@ TRACKED_FIELDS = [
     "seller_notes",
     "url",
     "price_valid_until",
+    "conditional_requirements",
+    "eligibility_confirmed",
 ]
 
 NUMERIC_FIELDS = {"advertised_price", "freight", "cashback", "rebate", "coupon_discount"}
@@ -47,6 +49,7 @@ NUMERIC_FIELDS = {"advertised_price", "freight", "cashback", "rebate", "coupon_d
 #: Fields holding a bare calendar date (YYYY-MM-DD), validated but not reformatted -
 #: the retailer statement they come from ("ends Monday 21/09") is a day, not a time.
 DATE_FIELDS = {"price_valid_until"}
+BOOLEAN_FIELDS = {"eligibility_confirmed"}
 
 VERIFICATION_ASPECTS = [
     "model",
@@ -81,6 +84,12 @@ def coerce(field: str, value: Any) -> Any:
     """Normalise an inbound value for a tracked field. Empty string means 'clear it'."""
     if field not in TRACKED_FIELDS:
         raise FieldError(f"{field!r} is not an editable listing field")
+    if field in BOOLEAN_FIELDS:
+        if value in (True, 1, "1", "true", "TRUE", "yes", "YES"):
+            return 1
+        if value in (None, False, 0, "0", "false", "FALSE", "no", "NO"):
+            return 0
+        raise FieldError(f"{field} must be true or false")
     if value is None:
         return None
     if field in NUMERIC_FIELDS:

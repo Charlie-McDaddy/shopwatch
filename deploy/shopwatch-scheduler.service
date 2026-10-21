@@ -1,0 +1,8 @@
+# Optional deployment recipe. This unit is not enabled by the application or Docker.
+[Unit]
+Description=Run due Shopwatch product checks
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shopwatch
+ExecStart=/usr/bin/docker compose exec -T shopwatch python -m app.schedules

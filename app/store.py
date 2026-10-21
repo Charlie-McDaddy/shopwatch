@@ -9,13 +9,14 @@ import zlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import pricing, provenance
 from .config import load_config
 from .db import utcnow
 
 PRODUCT_FIELDS = [
-    "name", "model", "brand", "category", "generation", "verdict", "status", "notes",
+    "name", "model", "brand", "category", "generation", "verdict", "status", "buying_mode", "notes",
     "trigger_price", "excellent_price", "historical_low_price",
     "lowest_known_price", "lowest_known_date", "lowest_known_retailer", "lowest_known_notes",
     "quantity", "quantity_unit",
@@ -46,6 +47,13 @@ STATUSES = ["ACTIVE", "PURCHASED", "PARKED"]
 #: appear on the same page, so reusing one palette is not a collision risk.
 CANDIDATE_PALETTE = ["blue", "amber", "green", "violet", "orange", "teal", "pink", "taupe"]
 DEFAULT_PICKUP_RADIUS_KM = 25
+PRICE_CHANGE_LABELS = {
+    "INITIAL": "Initial observation",
+    "CONTEXT_CHANGED": "Buying context changed; not a like-for-like comparison",
+    "RETAILER_PRICE_REDUCTION": "Retailer price reduced in a comparable context",
+    "NO_PRICE_REDUCTION": "No retailer price reduction",
+    "UNKNOWN": "Comparison context unknown",
+}
 
 
 def normalise_model(model: str | None) -> str:
@@ -169,7 +177,7 @@ def retailer_color(retailer_id: int | None) -> str | None:
 
 def household_settings(conn: sqlite3.Connection) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT postcode, pickup_radius_km FROM household_settings WHERE id = 1"
+        "SELECT postcode, pickup_radius_km, timezone FROM household_settings WHERE id = 1"
     ).fetchone()
     return dict(row)
 
@@ -233,9 +241,18 @@ def update_household_settings(
     radius = data.get("pickup_radius_km", current["pickup_radius_km"])
     if isinstance(radius, bool) or not isinstance(radius, int) or not 1 <= radius <= 500:
         raise ValueError("pickup_radius_km must be a whole number from 1 to 500")
+    timezone = data.get("timezone", current["timezone"])
+    if not isinstance(timezone, str):
+        raise ValueError("timezone must be an IANA timezone")
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("timezone must be an IANA timezone") from exc
     conn.execute(
-        "UPDATE household_settings SET postcode = ?, pickup_radius_km = ? WHERE id = 1",
-        (postcode, radius),
+        "UPDATE household_settings SET postcode = ?, pickup_radius_km = ?, timezone = ?"
+        " WHERE id = 1",
+        (postcode, radius, timezone),
     )
     return household_settings(conn)
 
@@ -258,6 +275,7 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
 
 def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
     _validate_quantity(data)
+    _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     payload.setdefault("category", "general")
     payload.setdefault("verdict", "MAYBE")
@@ -279,6 +297,7 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str, Any]) -> None:
     _validate_quantity(data, current=get_product(conn, product_id))
+    _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     if "specs" in data:
         payload["specs_json"] = json.dumps(data["specs"] or {})
@@ -309,6 +328,11 @@ def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str,
     )
     maybe_derive_price_targets(conn, product_id)
 
+
+
+def _validate_buying_mode(data: Mapping[str, Any]) -> None:
+    if "buying_mode" in data and data["buying_mode"] not in {"just_watching", "buy_asap"}:
+        raise ValueError("buying_mode must be just_watching or buy_asap")
 
 def _validate_quantity(data: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> None:
     quantity = data.get("quantity", current["quantity"] if current else None)
@@ -397,24 +421,44 @@ def enrich_listing(
     effective_freight, freight_current = effective_freight_for_listing(
         listing, household_postcode
     )
-    delivered = pricing.delivered_price(
+    provisional = pricing.delivered_price(
         listing["advertised_price"],
         effective_freight,
         listing["cashback"],
         listing["rebate"],
         listing["coupon_discount"],
     )
+    conditional = bool((listing.get("conditional_requirements") or "").strip())
+    eligibility_provenance = listing["provenance"]["eligibility_confirmed"]
+    eligible = bool(listing.get("eligibility_confirmed")) and (
+        eligibility_provenance["state"] == provenance.MANUAL
+        and eligibility_provenance["manual_locked"]
+    )
+    listing["eligibility_confirmed"] = bool(eligible)
+    delivered = pricing.delivered_price(
+        listing["advertised_price"], effective_freight,
+        listing["cashback"] if not conditional or eligible else None,
+        listing["rebate"] if not conditional or eligible else None,
+        listing["coupon_discount"] if not conditional or eligible else None,
+    )
     listing["delivered"] = delivered
     listing["delivered_price"] = delivered.value
     listing["delivered_resolved"] = delivered.resolved
     listing["freight_current"] = freight_current
     listing["pickup_current"] = pickup_current_for_listing(listing, household_postcode)
+    listing["provisional_delivered_price"] = (
+        provisional.value if conditional and not eligible else None
+    )
     listing["classification"] = pricing.classify(delivered, product)
     listing["classification_label"] = pricing.CLASS_LABELS[listing["classification"]]
     listing["diff_from_low"] = pricing.difference_from_low(
         delivered, product.get("lowest_known_price")
     )
     listing["verification"] = provenance.verification_map(conn, listing["id"])
+    if listing.get("model_on_page"):
+        listing["model_match"] = (
+            normalise_model(listing["model_on_page"]) == normalise_model(product["model"])
+        )
     if not freight_current and listing["freight"] is not None:
         listing["verification"]["freight"] = {
             **listing["verification"]["freight"],
@@ -428,6 +472,9 @@ def enrich_listing(
         f for f, p in listing["provenance"].items() if p["manual_locked"]
     )
     listing["rank"] = pricing.rank_key(delivered, penalty)
+    listing["offer_eligible"], listing["eligibility_reasons"] = pricing.listing_eligibility(
+        listing
+    )
     # Display-only: whether a retailer-stated promo end-date has already passed. This
     # never touches classify() or rank_key() above - issue #97 leaves "should a lapsed
     # promo affect classification" as a separate, undecided question, so a lapsed date
@@ -486,6 +533,23 @@ def product_view(
     if row is None:
         return None
     product = dict(row)
+    schedule_row = conn.execute(
+        "SELECT cadence, last_attempt_at, last_success_at, next_due_at, last_error"
+        " FROM product_check_schedules WHERE product_id = ?", (product_id,)
+    ).fetchone()
+    schedule = dict(schedule_row) if schedule_row else None
+    if schedule:
+        schedule["timezone"] = household_settings(conn)["timezone"]
+        zone = ZoneInfo(schedule["timezone"])
+        for key in ("last_attempt_at", "last_success_at", "next_due_at"):
+            value = schedule[key]
+            if value:
+                instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if instant.tzinfo is None:
+                    instant = instant.replace(tzinfo=UTC)
+                local = instant.astimezone(zone)
+                schedule[key.replace("_at", "_local")] = local.strftime("%d %b %Y %H:%M")
+    product["check_schedule"] = schedule
     product["specs"] = json.loads(product.pop("specs_json") or "{}")
     product["components"] = json.loads(product.pop("components_json") or "{}")
     listings = listings_for_product(conn, product, sort=sort)
@@ -765,13 +829,14 @@ def group_view(
                 "value": listing["delivered_price"],
                 "resolved": bool(listing["delivered_resolved"]),
                 "ruled_out": not pricing.listing_is_comparable(listing),
+                "offer_eligible": listing["offer_eligible"],
                 "verification": listing.get("verification"),
                 "candidate_color": member["candidate_color"],
             })
     group["scale"] = pricing.merge_price_points(points)
     # Same rule as a single product's best_listing: a ruled-out candidate never wins,
     # however cheap.
-    contenders = [p for p in points if pricing.listing_is_comparable(p)]
+    contenders = [p for p in points if p["offer_eligible"]]
     group["best"] = min(contenders, key=lambda p: p["value"]) if contenders else None
     return group
 
@@ -904,19 +969,84 @@ def record_observation(
     current_freight, _freight_current = effective_freight_for_listing(
         row, household_settings(conn)["postcode"]
     )
-    delivered = pricing.delivered_price(
-        row["advertised_price"], current_freight, row["cashback"], row["rebate"],
-        row["coupon_discount"],
+    confirmation = conn.execute(
+        "SELECT state, manual_locked FROM field_provenance"
+        " WHERE listing_id = ? AND field = 'eligibility_confirmed'", (listing_id,)
+    ).fetchone()
+    eligibility_confirmed = bool(row["eligibility_confirmed"]) and bool(
+        confirmation and confirmation["state"] == provenance.MANUAL
+        and confirmation["manual_locked"]
     )
+    apply_discounts = not (row["conditional_requirements"] or "").strip() or eligibility_confirmed
+    delivered = pricing.delivered_price(
+        row["advertised_price"], current_freight,
+        row["cashback"] if apply_discounts else None,
+        row["rebate"] if apply_discounts else None,
+        row["coupon_discount"] if apply_discounts else None,
+    )
+    settings = household_settings(conn)
+    verification = provenance.verification_map(conn, listing_id)
+    price_context = json.dumps(
+        {
+            "postcode": settings["postcode"],
+            "condition": row["condition"],
+            "stock_status": row["stock_status"],
+            "conditional_requirements": row["conditional_requirements"],
+            "eligibility_confirmed": eligibility_confirmed,
+            "delivery": {
+                "freight": current_freight,
+                "resolved": delivered.resolved,
+            },
+            "cashback": row["cashback"] if apply_discounts else None,
+            "rebate": row["rebate"] if apply_discounts else None,
+            "coupon_discount": row["coupon_discount"] if apply_discounts else None,
+            "pickup": {
+                "status": row["pickup_status"],
+                "location": row["pickup_location"],
+                "current": pickup_current_for_listing(row, settings["postcode"]),
+            },
+            "verification": {
+                aspect: verification[aspect]["status"]
+                for aspect in ("model", "price", "stock", "freight", "condition")
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    previous = conn.execute(
+        "SELECT advertised_price, price_context FROM price_history"
+        " WHERE listing_id = ? ORDER BY observed_at DESC, id DESC LIMIT 1",
+        (listing_id,),
+    ).fetchone()
+    if previous is None:
+        change_reason = "INITIAL"
+    elif previous["price_context"] is None:
+        change_reason = "UNKNOWN"
+    elif previous["price_context"] != price_context:
+        change_reason = "CONTEXT_CHANGED"
+    elif any(
+        verification[aspect]["status"] != provenance.VERIFIED
+        for aspect in ("model", "price")
+    ):
+        change_reason = "UNKNOWN"
+    elif (
+        previous["advertised_price"] is not None
+        and row["advertised_price"] is not None
+        and row["advertised_price"] < previous["advertised_price"]
+    ):
+        change_reason = "RETAILER_PRICE_REDUCTION"
+    else:
+        change_reason = "NO_PRICE_REDUCTION"
     cur = conn.execute(
         "INSERT INTO price_history (product_id, listing_id, retailer_id, observed_at,"
         " advertised_price, delivered_price, freight, freight_resolved, cashback,"
-        " stock_status, condition, source, note)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " stock_status, condition, source, note, price_context, price_change_reason)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             row["product_id"], listing_id, row["retailer_id"], utcnow(),
             row["advertised_price"], delivered.value, row["freight"], int(delivered.resolved),
             row["cashback"], row["stock_status"], row["condition"], source, note,
+            price_context, change_reason,
         ),
     )
     maybe_lower_known_low(conn, row["product_id"], delivered, listing_id)
@@ -1085,12 +1215,17 @@ def price_history(
     conn: sqlite3.Connection, product_id: int, limit: int = 500
 ) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT h.*, r.name AS retailer_name FROM price_history h"
+        "SELECT h.*, r.name AS retailer_name, l.url AS listing_url FROM price_history h"
         " LEFT JOIN retailers r ON r.id = h.retailer_id"
+        " LEFT JOIN listings l ON l.id = h.listing_id"
         " WHERE h.product_id = ? ORDER BY h.observed_at DESC, h.id DESC LIMIT ?",
         (product_id, limit),
     ).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    for row in result:
+        reason = row.get("price_change_reason") or "UNKNOWN"
+        row["price_change_label"] = PRICE_CHANGE_LABELS.get(reason, PRICE_CHANGE_LABELS["UNKNOWN"])
+    return result
 
 
 # --------------------------------------------------------------------------- categories

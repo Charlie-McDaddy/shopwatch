@@ -27,6 +27,12 @@ def test_unit_price_is_exposed_for_each_separate_product(client):
     client.post(f"/api/products/{large['id']}/retailers", json={
         "retailer": "Large-pack shop", "advertised_price": 15, "freight": 0,
     })
+    for product in (small, large):
+        listing = client.get(f"/api/products/{product['id']}").json()["listings"][0]
+        client.patch(f"/api/retailers/{listing['id']}", json={"stock_status": "In stock"})
+        for aspect in ("model", "price", "stock"):
+            client.post(f"/api/retailers/{listing['id']}/verification",
+                        json={"aspect": aspect, "status": "VERIFIED"})
     small = client.get(f"/api/products/{small['id']}").json()
     large = client.get(f"/api/products/{large['id']}").json()
     assert small["best_unit_price"] == [20.0, "kg"]

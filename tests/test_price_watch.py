@@ -259,6 +259,9 @@ def test_model_mismatch_does_not_update_price_history_or_alert(wired, monkeypatc
             (product["id"], listing["id"]),
         )
         provenance.set_field(conn, listing["id"], "freight", 0, state=provenance.MANUAL)
+        provenance.set_field(conn, listing["id"], "stock_status", "In Stock", state=provenance.MANUAL)
+        for aspect in ("price", "stock"):
+            provenance.set_verification(conn, listing["id"], aspect, provenance.VERIFIED)
         conn.execute(
             "INSERT INTO alert_rules (product_id, name, max_delivered, require_complete,"
             " require_resolved, min_change) VALUES (?, 'Mismatch guard', 2000, 0, 1, 1)",
@@ -318,6 +321,9 @@ def test_a_correct_model_refresh_does_not_clear_a_manual_rule_out(wired, monkeyp
         ).fetchone()
         listing_id = row["id"]
         conn.execute("UPDATE listings SET ruled_out = 1 WHERE id = ?", (listing_id,))
+        provenance.set_field(conn, listing_id, "stock_status", "In Stock", state=provenance.MANUAL)
+        for aspect in ("price", "stock"):
+            provenance.set_verification(conn, listing_id, aspect, provenance.VERIFIED)
         provenance.set_verification(
             conn, listing_id, "model", provenance.FLAGGED, "prior model mismatch"
         )
@@ -332,4 +338,4 @@ def test_a_correct_model_refresh_does_not_clear_a_manual_rule_out(wired, monkeyp
         saved = conn.execute("SELECT ruled_out FROM listings WHERE id = ?", (listing_id,)).fetchone()
         assert saved["ruled_out"] == 1
         assert provenance.verification_map(conn, listing_id)["model"]["status"] != provenance.FLAGGED
-        assert store.product_view(conn, product["id"])["best_listing"]["id"] != listing_id
+        assert store.product_view(conn, product["id"])["best_listing"] is None

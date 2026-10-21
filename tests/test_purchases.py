@@ -1,8 +1,4 @@
-"""Product lifecycle and purchase records.
-
-The behaviour that matters: buying something stops it nagging you, without deleting
-anything you learned while hunting it.
-"""
+"""Purchases preserve watching and history; pause and archive suppress alerts."""
 
 from __future__ import annotations
 
@@ -31,6 +27,10 @@ def armed(seeded):
     with connect(seeded) as conn:
         _, listing = crowdshop(conn)
         provenance.set_field(conn, listing["id"], "freight", 25.0, state=provenance.MANUAL)
+        provenance.set_field(conn, listing["id"], "stock_status", "In stock",
+                             state=provenance.MANUAL)
+        for aspect in ("model", "price", "stock"):
+            provenance.set_verification(conn, listing["id"], aspect, provenance.VERIFIED)
         conn.commit()
     return seeded
 

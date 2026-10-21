@@ -174,24 +174,66 @@ def difference_from_low(delivered: Delivered | float | None, lowest_known: Any) 
 
 
 def listing_is_comparable(listing: Mapping[str, Any]) -> bool:
-    """Whether a listing is eligible to affect comparisons and alerts."""
+    """Whether the listing was not rejected and its model is not flagged."""
     verification = listing.get("verification") or {}
     model = verification.get("model") or {}
     return not listing.get("ruled_out") and model.get("status") != "FLAGGED"
 
 
+def listing_eligibility(
+    listing: Mapping[str, Any], *, require_new: bool = True, require_delivery: bool = True
+) -> tuple[bool, list[str]]:
+    """Whether this is a confirmed, current, unconditional buying option."""
+    verification = listing.get("verification") or {}
+    reasons = []
+    if not listing_is_comparable(listing):
+        reasons.append("model is not confirmed or listing is ruled out")
+    if listing.get("model_match") is False:
+        reasons.append("listed variant does not match the product")
+    for aspect in ("model", "price", "stock"):
+        if (verification.get(aspect) or {}).get("status") not in {
+            "VERIFIED", "LIVE", "MANUAL",
+        }:
+            reasons.append(f"{aspect} is unverified")
+    if require_new and (listing.get("condition") or "").upper() != "NEW":
+        reasons.append("condition is not new")
+    stock = (listing.get("stock_status") or "").casefold()
+    available = (
+        stock.startswith("in stock")
+        or stock in {"available", "available now", "available online", "limited"}
+        or stock.startswith(("limited stock", "limited availability"))
+    ) and not any(
+        word in stock
+        for word in (
+            "out of stock", "unavailable", "sold out", "preorder", "pre-order", "backorder",
+        )
+    )
+    if not available:
+        reasons.append("availability is unknown or unavailable")
+    if require_delivery and not listing.get("delivered_resolved"):
+        reasons.append("delivery total is unconfirmed")
+    if not listing.get("freight_current", True):
+        reasons.append("delivery quote is for another location")
+    requirements = (listing.get("conditional_requirements") or "").strip()
+    if requirements and listing.get("eligibility_confirmed"):
+        confirmation = (listing.get("provenance") or {}).get("eligibility_confirmed") or {}
+        if confirmation.get("state") != "MANUAL" or not confirmation.get("manual_locked"):
+            reasons.append("eligibility confirmation was not set by hand")
+    elif requirements:
+        reasons.append(requirements)
+    return not reasons, reasons
+
+
 def best_listing(rows: list[Mapping[str, Any]], penalty: float = 60.0) -> Mapping[str, Any] | None:
-    """The current best buy: cheapest confirmed delivered price, unresolved listings penalised.
+    """The current best new buy among verified, available, eligible delivered offers.
 
     A ruled-out listing or one with a flagged model is never the answer, however cheap.
     It stays visible on the board and axis so the operator can review it, but it cannot
-    be nominated: the board was headlining Crowdshop's $869
-    hours after that price had been rejected, because cheapest and best were the same
-    question here and they are not.
+    be nominated. Provisional prices remain on their rows, but do not establish a best.
     """
     priced = [
         r for r in rows
-        if r.get("delivered") and r["delivered"].known and listing_is_comparable(r)
+        if r.get("delivered") and r["delivered"].known and listing_eligibility(r)[0]
     ]
     if not priced:
         return None
