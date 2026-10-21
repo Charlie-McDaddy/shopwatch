@@ -110,6 +110,15 @@ def test_jsonld_boolean_price_is_not_a_numeric_archive_amount():
     assert wayback._model_price_from_html(page, "MODEL-1") is None
 
 
+def test_unrepresentably_large_archive_price_is_an_honest_gap(monkeypatch):
+    allow_public_dns(monkeypatch)
+    responses = iter([Response(cdx()), Response(html(price=10**400))])
+    monkeypatch.setattr(wayback.requests, "get", lambda *a, **k: next(responses))
+    result = wayback.lookup_listing("https://shop.example/item", "MODEL-1")
+    assert result["status"] == "no_usable_price"
+    assert result["snapshots"] == []
+
+
 def test_no_cdx_capture_is_an_honest_gap(monkeypatch):
     allow_public_dns(monkeypatch)
     monkeypatch.setattr(wayback.requests, "get", lambda *a, **k: Response(b'[["timestamp","original"]]'))
@@ -221,6 +230,39 @@ def test_persistence_rejects_boolean_prices_and_nonarchive_sources(conn, seeded)
                     "advertised_price": True,
                     "currency": "AUD",
                 },
+            ],
+        },
+        "2026-10-21T00:00:00Z",
+    )
+    evidence, coverage = wayback.history(conn, product["id"])
+    assert evidence == []
+    assert coverage[0]["status"] == "no_usable_price"
+
+
+def test_persistence_rejects_unrepresentably_large_archive_prices(conn, seeded):
+    from app import store
+
+    product = store.list_products(conn)[0]
+    listing = product["listings"][0]
+    original = "https://shop.example/item"
+    wayback.persist_lookup(
+        conn,
+        product["id"],
+        listing["id"],
+        original,
+        product["model"],
+        {
+            "status": "evidence",
+            "snapshots": [
+                {
+                    "snapshot_url": (
+                        "https://web.archive.org/web/20230101000000id_/" + original
+                    ),
+                    "captured_at": "2023-01-01T00:00:00Z",
+                    "model": product["model"],
+                    "advertised_price": 10**400,
+                    "currency": "AUD",
+                }
             ],
         },
         "2026-10-21T00:00:00Z",

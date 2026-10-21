@@ -6,6 +6,7 @@ Headline price is informational only.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -42,7 +43,8 @@ def unit_price(
     if unit not in factors:
         return None
     factor, label = factors[unit]
-    return round(cost * factor / amount, 2), label
+    result = cost * factor / amount
+    return (round(result, 2), label) if math.isfinite(result) else None
 
 
 CONDITIONS = [
