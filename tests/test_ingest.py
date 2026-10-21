@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from app import ingest, provenance, store
@@ -116,8 +118,20 @@ def test_batch_import_reports_failures_without_losing_the_good_rows(seeded):
 
 def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatch):
     with connect(seeded) as conn:
+        store.update_household_settings(conn, {"postcode": "4000", "pickup_radius_km": 40})
+        listing = conn.execute(
+            "SELECT id FROM listings ORDER BY id LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE listings SET freight = 25, freight_postcode = '4000', pickup_status = 'Available', pickup_location = 'Brisbane CBD', pickup_postcode = '4000' WHERE id = ?",
+            (listing["id"],),
+        )
         snapshot = ingest.export_all(conn)
     assert snapshot["format"] == "shopwatch-snapshot"
+    assert snapshot["household_settings"] == {"postcode": "4000", "pickup_radius_km": 40}
+    exported_listing = next(row for row in snapshot["listings"] if row["id"] == listing["id"])
+    assert exported_listing["freight_postcode"] == "4000"
+    assert exported_listing["pickup_postcode"] == "4000"
     assert any(p["model"] == "HW-Q930H/XY" for p in snapshot["products"])
 
     from app.db import migrate
@@ -132,6 +146,14 @@ def test_snapshot_round_trip_into_an_empty_database(seeded, tmp_path, monkeypatc
         assert product is not None
         view = store.product_view(conn, product["id"])
         assert report["products"] == 1
+        assert store.household_settings(conn) == {"postcode": "4000", "pickup_radius_km": 40}
+        restored_listing = conn.execute(
+            "SELECT freight, freight_postcode, pickup_postcode FROM listings WHERE product_id = ? ORDER BY id LIMIT 1",
+            (product["id"],),
+        ).fetchone()
+        assert restored_listing["freight"] == 25
+        assert restored_listing["freight_postcode"] == "4000"
+        assert restored_listing["pickup_postcode"] == "4000"
         assert len(view["listings"]) == 5
         assert view["trigger_price"] == 900
 
@@ -239,3 +261,128 @@ def test_import_stores_hostile_text_verbatim_so_the_view_layer_must_escape(seede
         assert report["retailer"] == payload, "stored exactly as given, not silently rewritten"
         prov = provenance.provenance_map(conn, report["listing_id"])["advertised_price"]
         assert prov["source"] == "<script>alert(2)</script>"
+
+
+def test_marketplace_offers_survive_snapshot_round_trip(seeded, tmp_path, monkeypatch):
+    from app.db import migrate
+
+    with connect(seeded) as conn:
+        for seller, price in (("SELLER-A", 20), ("SELLER-B", 22)):
+            ingest.import_finding(conn, {
+                "model": "HW-Q930H/XY", "retailer": "Amazon.com.au",
+                "source_url": "https://www.amazon.com.au/dp/B0TEST123",
+                "seller_id": seller, "seller_name": seller, "price": price,
+            })
+        snapshot = ingest.export_all(conn)
+        marketplace_rows = [row for row in snapshot["listings"] if row.get("seller_id")]
+        assert {row["seller_id"] for row in marketplace_rows} == {"SELLER-A", "SELLER-B"}
+
+    target = tmp_path / "marketplace-restored.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(target))
+    migrate(target)
+    with connect(target) as conn:
+        ingest.import_snapshot(conn, snapshot)
+        conn.commit()
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        rows = conn.execute(
+            "SELECT seller_id, advertised_price FROM listings WHERE product_id = ?"
+            " AND seller_id IS NOT NULL ORDER BY seller_id", (product["id"],)
+        ).fetchall()
+        assert [(row["seller_id"], row["advertised_price"]) for row in rows] == [
+            ("SELLER-A", 20.0), ("SELLER-B", 22.0),
+        ]
+
+
+def test_snapshot_round_trip_preserves_wayback_evidence_and_coverage(seeded, tmp_path, monkeypatch):
+    from app import wayback
+
+    with connect(seeded) as conn:
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        listing = store.find_listing(
+            conn, product["id"], store.ensure_retailer(conn, "Crowdshop")["id"]
+        )
+        original_url = "https://www.crowdshop.example/soundbar"
+        snapshot_url = (
+            "https://web.archive.org/web/20230101000000id_/"
+            "https://www.crowdshop.example/soundbar"
+        )
+        wayback.persist_lookup(
+            conn,
+            product["id"],
+            listing["id"],
+            original_url,
+            product["model"],
+            {
+                "status": "evidence",
+                "note": "Archived advertised price; freight is unknown.",
+                "snapshots": [{
+                    "snapshot_url": snapshot_url,
+                    "captured_at": "2023-01-01T00:00:00Z",
+                    "model": product["model"],
+                    "advertised_price": 899.0,
+                    "currency": "AUD",
+                    "price_context": "Archived advertised price; freight unknown.",
+                }],
+            },
+            "2026-10-21T00:00:00Z",
+        )
+        snapshot = ingest.export_all(conn)
+        historyless = ingest.export_all(conn, include_history=False)
+        assert "wayback_price_evidence" in snapshot
+        assert "wayback_price_evidence" not in historyless
+
+    from app.db import migrate
+
+    target = tmp_path / "restored-wayback.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(target))
+    migrate(target)
+    with connect(target) as conn:
+        ingest.import_snapshot(conn, snapshot)
+        conn.commit()
+        restored = store.product_by_model(conn, "HW-Q930H/XY")
+        evidence, coverage = wayback.history(conn, restored["id"])
+        assert len(evidence) == 1
+        assert evidence[0]["snapshot_url"] == snapshot_url
+        assert evidence[0]["original_url"] == original_url
+        assert evidence[0]["captured_at"] == "2023-01-01T00:00:00Z"
+        assert evidence[0]["matched_model"] == "HW-Q930H/XY"
+        assert evidence[0]["advertised_price"] == 899.0
+        assert coverage[0]["status"] == "evidence"
+        # Re-importing a backup does not append the same archived capture a second time.
+        ingest.import_snapshot(conn, snapshot)
+        assert len(wayback.history(conn, restored["id"])[0]) == 1
+
+    bad_snapshot = copy.deepcopy(snapshot)
+    bad_snapshot["wayback_price_evidence"][0]["snapshot_url"] = (
+        "https://attacker.example/web/20230101000000id_/https://www.crowdshop.example/soundbar"
+    )
+    bad_target = tmp_path / "restored-wayback-untrusted.db"
+    monkeypatch.setenv("SHOPWATCH_DB", str(bad_target))
+    migrate(bad_target)
+    with connect(bad_target) as conn:
+        ingest.import_snapshot(conn, bad_snapshot)
+        conn.commit()
+        restored = store.product_by_model(conn, "HW-Q930H/XY")
+        evidence, coverage = wayback.history(conn, restored["id"])
+        assert evidence == []
+        assert coverage[0]["status"] == "no_usable_price"
+
+
+def test_imported_freight_does_not_claim_the_household_postcode(seeded):
+    with connect(seeded) as conn:
+        store.update_household_settings(conn, {"postcode": "4000"})
+        product = store.product_by_model(conn, "HW-Q930H/XY")
+        known_low_before = product["lowest_known_price"]
+        result = ingest.import_finding(
+            conn,
+            {"model": "HW-Q930H/XY", "retailer": "Crowdshop", "price": 500, "freight": 0},
+        )
+
+        listing = store.product_view(conn, product["id"])["listings"]
+        imported = next(row for row in listing if row["id"] == result["listing_id"])
+        history = store.price_history(conn, product["id"])[0]
+        assert imported["freight"] == 0
+        assert imported["freight_postcode"] is None
+        assert imported["delivered_resolved"] is False
+        assert history["freight_resolved"] == 0
+        assert store.get_product(conn, product["id"])["lowest_known_price"] == known_low_before

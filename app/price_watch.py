@@ -67,8 +67,11 @@ def check_listing(
 ) -> str:
     """Check one listing. Returns 'ok', 'unresolved', 'skipped' or 'error'."""
     adapter = retailers.get_adapter(listing["retailer_adapter"])
-    if adapter is None:
-        _record(conn, run_id, listing["id"], "skipped", "no adapter for this retailer")
+    from . import url_intake
+    domain = url_intake.bare_domain(listing["url"] or "")
+    scoped_adapter = url_intake.adapter_for_domain(domain) if domain else None
+    if adapter is None or scoped_adapter is None or scoped_adapter.slug != adapter.slug:
+        _record(conn, run_id, listing["id"], "skipped", "no supported automatic check for this URL")
         return "skipped"
     if not listing["url"]:
         _record(conn, run_id, listing["id"], "skipped", "listing has no URL")
@@ -80,6 +83,7 @@ def check_listing(
         # Deliberately leaves every stored value alone. The previous reading is still the
         # best information available; an error is not evidence that the price changed.
         _record(conn, run_id, listing["id"], "error", str(exc))
+        conn.execute("UPDATE listings SET check_error = ? WHERE id = ?", (str(exc), listing["id"]))
         log.warning("%s: %s", adapter.name, exc)
         return "error"
     except Exception as exc:  # an adapter bug must not abort the whole run
@@ -87,48 +91,58 @@ def check_listing(
             conn, run_id, listing["id"], "error",
             f"adapter crashed: {type(exc).__name__}: {exc}",
         )
+        conn.execute(
+            "UPDATE listings SET check_error = ? WHERE id = ?",
+            (f"adapter crashed: {type(exc).__name__}: {exc}", listing["id"]),
+        )
         log.exception("adapter %s crashed", adapter.slug)
         return "error"
+
+    for warning in observation.warnings:
+        _record(conn, run_id, listing["id"], "warning", warning)
+
+    mismatch = next((w for w in observation.warnings if "model mismatch" in w), None)
+    current_verification = provenance.verification_map(conn, listing["id"])
+    model_flagged = current_verification["model"]["status"] == provenance.FLAGGED
+    manufacturer_match = observation.model_on_page_key in retailers.MANUFACTURER_KEYS
+    if mismatch:
+        provenance.set_verification(conn, listing["id"], "model", provenance.FLAGGED, mismatch)
+        conn.execute(
+            "UPDATE listings SET last_checked_at = ?, updated_at = ?, check_error = ? WHERE id = ?",
+            (utcnow(), utcnow(), mismatch, listing["id"]),
+        )
+        _record(conn, run_id, listing["id"], "error", mismatch)
+        return "error"
+    if model_flagged and not manufacturer_match:
+        # A previous model mismatch stays out of comparison until a manufacturer
+        # identifier confirms that this page is the expected product again.
+        note = current_verification["model"]["note"] or "model identity remains unverified"
+        conn.execute(
+            "UPDATE listings SET last_checked_at = ?, updated_at = ?, check_error = ? WHERE id = ?",
+            (utcnow(), utcnow(), note, listing["id"]),
+        )
+        _record(conn, run_id, listing["id"], "error", note)
+        return "error"
+
+    if model_flagged and manufacturer_match:
+        provenance.set_verification(
+            conn, listing["id"], "model", provenance.LIVE,
+            f"cleared: {observation.model_on_page!r} matched on this run",
+        )
 
     values = observation.to_values()
     applied = provenance.apply_values(
         conn, listing["id"], values, state=provenance.LIVE, source=adapter.slug
     )
+    if "freight" in applied["written"]:
+        store.clear_freight_location_confirmation(conn, listing["id"])
+    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+        store.clear_pickup_location_confirmation(conn, listing["id"])
     conn.execute(
-        "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
+        "UPDATE listings SET last_checked_at = ?, updated_at = ?, check_error = NULL WHERE id = ?",
         (utcnow(), utcnow(), listing["id"]),
     )
     provenance.sync_verification_from_provenance(conn, listing["id"])
-
-    for warning in observation.warnings:
-        _record(conn, run_id, listing["id"], "warning", warning)
-
-    # The note has to be the warning that caused the flag, not warnings[0]. Any adapter
-    # appending its own warning first would otherwise file unrelated text under the
-    # "model mismatch" fault tag, and the operator reads a reason that has nothing to
-    # do with why the listing is flagged.
-    mismatch = next((w for w in observation.warnings if "model mismatch" in w), None)
-    if mismatch:
-        provenance.set_verification(conn, listing["id"], "model", provenance.FLAGGED, mismatch)
-    elif observation.model_on_page_key in retailers.MANUFACTURER_KEYS:
-        # This run actually compared a manufacturer identifier and it matched, so a
-        # flag left by an earlier run is now known to be wrong. Clear it.
-        #
-        # sync_verification_from_provenance deliberately never touches a FLAGGED
-        # aspect, so without this a listing flagged by the old shape-based comparison
-        # stays red forever, which is the outcome that fix existed to prevent. The same
-        # applied to any one-off bad reading.
-        #
-        # Only cleared when the check genuinely ran: a page publishing just a merchant
-        # stock number gives no evidence either way, and silence is not a clean bill of
-        # health (hardening rule 12).
-        current = provenance.verification_map(conn, listing["id"])
-        if current["model"]["status"] == provenance.FLAGGED:
-            provenance.set_verification(
-                conn, listing["id"], "model", provenance.LIVE,
-                f"cleared: {observation.model_on_page!r} matched on this run",
-            )
-
     store.record_observation(conn, listing["id"], source=adapter.slug)
 
     payload = {
@@ -159,19 +173,12 @@ def run(
         run_id = _open_run(conn, trigger)
         summary["run_id"] = run_id
 
-        # Only products still being hunted are checked, plus purchased ones inside an
-        # open price-protection window. Polling a retailer about something already bought
-        # and not under protection is a request nobody reads the answer to.
+        # A purchase keeps the card's watch active; pausing or archiving it stops checks.
         where = (
-            "WHERE l.active = 1 AND ("
-            "  p.status = 'ACTIVE'"
-            "  OR (p.status = 'PURCHASED' AND EXISTS ("
-            "       SELECT 1 FROM purchases pu WHERE pu.product_id = p.id"
-            "         AND pu.price_protection_until IS NOT NULL"
-            "         AND substr(pu.price_protection_until, 1, 10) >= ?))"
-            ")"
+            "WHERE l.active = 1 AND p.archived = 0"
+            " AND p.status IN ('ACTIVE', 'PURCHASED')"
         )
-        params: list = [utcnow()[:10]]
+        params: list = []
         if product_id:
             where += " AND l.product_id = ?"
             params.append(product_id)

@@ -13,9 +13,10 @@ here is cheaper than that coupling.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import retailers
+from .urls import public_http_url
 
 
 def bare_domain(url: str) -> str | None:
@@ -25,11 +26,11 @@ def bare_domain(url: str) -> str | None:
     evidence it is a URL at all, and a scheme this app cannot fetch later (ftp:,
     mailto:, javascript:) must not be accepted just because urlparse tolerates it.
     """
+    if not public_http_url(url):
+        return None
     try:
         parsed = urlparse(url)
     except ValueError:
-        return None
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
     netloc = parsed.netloc.lower()
     return netloc[4:] if netloc.startswith("www.") else netloc
@@ -68,3 +69,49 @@ def display_name_for_domain(domain: str) -> str:
     base = _TLD_RE.sub("", domain)
     parts = re.split(r"[.\-_]+", base)
     return " ".join(p.capitalize() for p in parts if p) or domain
+
+
+def is_marketplace_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return (host == "amazon.com.au" or host.endswith(".amazon.com.au")
+            or host == "temu.com" or host.endswith(".temu.com"))
+
+
+def marketplace_identity(url: str, payload: dict) -> dict[str, str | None]:
+    """Extract explicit or URL-published seller and offer identifiers."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    query = parse_qs(parsed.query)
+    amazon = host == "amazon.com.au" or host.endswith(".amazon.com.au")
+    temu = host == "temu.com" or host.endswith(".temu.com")
+    seller_keys = (("seller_id", "sellerId", "merchantId", "seller", "merchant", "m")
+                   if amazon else ("seller_id", "sellerId", "merchantId"))
+    offer_keys = ("offer_id", "offerId", "offerListingID", "listingId")
+
+    def first(names: tuple[str, ...]) -> str | None:
+        for name in names:
+            value = payload.get(name)
+            if value is None and (amazon or temu):
+                value = next((items[0] for key, items in query.items()
+                              if key.lower() == name.lower() and items), None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+        return None
+
+    seller_id = first(seller_keys)
+    offer_id = first(offer_keys)
+    seller_name = payload.get("seller_name")
+    if seller_name is not None and not isinstance(seller_name, str):
+        raise ValueError("seller_name must be text")
+    seller_name = seller_name.strip()[:200] if seller_name and seller_name.strip() else None
+    if not (amazon or temu):
+        seller_name = seller_id = offer_id = None
+    identity_parts = [part for part in (
+        f"seller:{seller_id}" if seller_id else None,
+        f"offer:{offer_id}" if offer_id else None,
+    ) if part]
+    if not identity_parts and seller_name:
+        identity_parts.append(f"name:{seller_name.casefold()}")
+    key = "|".join(identity_parts)
+    return {"seller_name": seller_name, "seller_id": seller_id,
+            "offer_id": offer_id, "offer_key": key}

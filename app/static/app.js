@@ -428,25 +428,7 @@ wire('btn-backup', async () => {
 wire('btn-import', () => document.getElementById('import-dialog').showModal());
 
 wire('btn-llm-setup', () => {
-  document.getElementById('llm-setup-command').textContent =
-    `python3 llm-helper.py --url ${window.location.origin} --backend claude`;
-  // The zip route accepts the same origin the plain-script command already uses,
-  // so every launcher inside it needs no editing either - server-side request.base_url
-  // would be wrong behind a reverse proxy without forwarded-host handling; the
-  // browser always knows the real origin.
-  document.getElementById('llm-setup-zip-link').href =
-    `/tools/llm-helper.zip?url=${encodeURIComponent(window.location.origin)}`;
   document.getElementById('llm-setup-dialog').showModal();
-});
-
-wire('llm-setup-copy', async () => {
-  const text = document.getElementById('llm-setup-command').textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('Copied.', 'good');
-  } catch {
-    toast('Could not copy - select the text manually.', 'bad');
-  }
 });
 wire('import-go', async () => {
   const out = document.getElementById('import-result');
@@ -786,14 +768,15 @@ document.getElementById('wiz-model')?.addEventListener('blur', async event => {
 
 /* Polls a queued job row (llm_jobs or retailer_search_jobs - same {status, result,
  * error} shape) until it lands, same idea as wizPoll() for research jobs below.
- * notRunningHint is job-kind-specific: the two claimants (a user's own machine vs
- * opti's runner) fail differently and need different troubleshooting advice. */
-async function pollJob(getUrl, { intervalMs = 1000, timeoutMs = 30000, notRunningHint } = {}) {
+ * notRunningHint is job-kind-specific because GUI queues can be serviced by different
+ * host processes and need different troubleshooting advice. */
+async function pollJob(getUrl, { intervalMs = 1000, timeoutMs = 30000, notRunningHint, onStatus } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const job = await api(getUrl);
+    if (onStatus) onStatus(job.status);
     if (job.status === 'DONE') return JSON.parse(job.result);
-    if (job.status === 'FAILED') throw new Error(job.error || 'the helper failed to answer');
+    if (job.status === 'FAILED') throw new Error(job.error || 'the research runner failed to answer');
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
   throw new Error(`no answer in time - ${notRunningHint}`);
@@ -815,7 +798,13 @@ async function wizRunJob({ btn, siblingBtn, box, busyText, idleText, waitingText
   try {
     const { createUrl, body, pollUrl } = await create();
     const job = await api(createUrl, { method: 'POST', body });
-    const result = await pollJob(pollUrl(job.id), pollOpts);
+    const result = await pollJob(pollUrl(job.id), {
+      ...pollOpts,
+      onStatus: status => {
+        const text = status === 'RUNNING' ? pollOpts.runningText : pollOpts.queuedText;
+        if (text) box.replaceChildren(el('p', text, 'muted'));
+      },
+    });
     box.replaceChildren();
     onResult(result, box);
   } catch (err) {
@@ -845,6 +834,14 @@ function renderModelSuggestions(result) {
       document.getElementById('wiz-model').dispatchEvent(new Event('blur'));
     });
     box.appendChild(chip);
+    const source = safeHttpUrl(c.source);
+    if (source) {
+      const link = el('a', 'Source');
+      link.href = source;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      box.appendChild(link);
+    }
   }
   if (result.note) box.appendChild(el('p', result.note, 'muted'));
 }
@@ -856,13 +853,16 @@ wire('wiz-suggest-models', async () => {
     btn: document.getElementById('wiz-suggest-models'),
     box: document.getElementById('wiz-model-suggestions'),
     busyText: 'Asking...', idleText: 'Suggest models',
-    waitingText: 'Waiting for your LLM helper to answer...',
+    waitingText: 'Waiting for the server research runner...',
     create: () => ({
       createUrl: '/api/llm-jobs', body: { query },
       pollUrl: id => `/api/llm-jobs/${id}`,
     }),
-    pollOpts: { notRunningHint: 'is tools/llm-helper.py running? See "Set up your LLM" '
-      + 'at the top of the page.' },
+    pollOpts: { intervalMs: 3000, timeoutMs: 240000,
+      queuedText: 'Queued for the server research runner...',
+      runningText: 'Searching for sourced model suggestions...',
+      notRunningHint: 'the server research runner has not picked up the job yet. Retry '
+        + 'in a moment or reconnect the Claude Code session on the research host.' },
     onResult: renderModelSuggestions,
     onError: err => `Could not get suggestions: ${err.message}`,
   });
@@ -914,7 +914,7 @@ function wireDiscoveryButtons({ llmBtnId, webBtnId, boxId, getPicker, getName, g
       siblingBtn: document.getElementById(webBtnId),
       box: document.getElementById(boxId),
       busyText: 'Asking...', idleText: 'Find other retailers',
-      waitingText: 'Waiting for your LLM helper to answer...',
+      waitingText: 'Waiting for the server research runner...',
       create: () => {
         const known = picker.knownRetailers().map(r => r.name);
         const query = `Product: ${name}${model ? ` (${model})` : ''}. Already checking these `
@@ -924,8 +924,11 @@ function wireDiscoveryButtons({ llmBtnId, webBtnId, boxId, getPicker, getName, g
           pollUrl: id => `/api/llm-jobs/${id}`,
         };
       },
-      pollOpts: { notRunningHint: 'is tools/llm-helper.py running? See "Set up your LLM" '
-        + 'at the top of the page.' },
+      pollOpts: { intervalMs: 3000, timeoutMs: 240000,
+        queuedText: 'Queued for the server research runner...',
+        runningText: 'Searching for other Australian retailers...',
+        notRunningHint: 'the server research runner has not picked up the job yet. Retry '
+          + 'in a moment or reconnect the Claude Code session on the research host.' },
       onResult: (result, box) => { if (!isStale(generation)) picker.renderDiscovered(result, box); },
       onError: err => `Could not ask the LLM for retailers: ${err.message}`,
     });
@@ -959,6 +962,8 @@ function wireDiscoveryButtons({ llmBtnId, webBtnId, boxId, getPicker, getName, g
       // Long timeout: the opti runner that answers this only polls every 2 minutes
       // (shopwatch-research-runner.timer), unlike llm-helper.py's own short interval.
       pollOpts: { intervalMs: 3000, timeoutMs: 240000,
+        queuedText: 'Queued for the server research runner...',
+        runningText: 'Searching the web for other retailers...',
         notRunningHint: 'is the opti research runner online? It only checks for a new '
           + 'job every 2 minutes, so this can genuinely take a couple of minutes.' },
       onResult: (result, box) => { if (!isStale(generation)) picker.renderDiscovered(result, box); },
@@ -1083,8 +1088,24 @@ wire('al-save', async () => {
  * a URL-scoped research job otherwise, and the listing lands with its URL either way).
  */
 
+wire('btn-wayback-history', async event => {
+  const button = event.currentTarget;
+  const productId = Number(button.dataset.product);
+  button.disabled = true;
+  button.textContent = 'Checking archived listings...';
+  try {
+    const result = await api(`/api/products/${productId}/wayback-history`, { method: 'POST' });
+    toast(`${result.evidence_count} sourced archive price${result.evidence_count === 1 ? '' : 's'} found.`, 'good');
+    location.reload();
+  } catch (err) {
+    toast(`Could not check Wayback history: ${err.message}`, 'bad');
+    button.disabled = false;
+    button.textContent = 'Check archived listings';
+  }
+});
+
 wire('btn-add-listing-url', () => {
-  document.getElementById('ul-url').value = '';
+  for (const id of ['ul-url', 'ul-seller-name', 'ul-seller-id', 'ul-offer-id']) document.getElementById(id).value = '';
   document.getElementById('url-listing-dialog').showModal();
 });
 wire('ul-save', async () => {
@@ -1096,7 +1117,11 @@ wire('ul-save', async () => {
   btn.disabled = true;
   try {
     const result = await api(`/api/products/${productId}/retailers/from-url`, {
-      method: 'POST', body: { url },
+      method: 'POST', body: {
+        url, seller_name: document.getElementById('ul-seller-name').value.trim() || null,
+        seller_id: document.getElementById('ul-seller-id').value.trim() || null,
+        offer_id: document.getElementById('ul-offer-id').value.trim() || null,
+      },
     });
     const message = result.scraped
       ? `Listing added for ${result.retailer.name} - price found straight away.`
@@ -1625,7 +1650,7 @@ wire('pu-save', async () => {
   };
   try {
     await api(`/api/products/${productId}/purchase`, { method: 'POST', body });
-    toast('Purchase recorded. Alerts for this product are off.', 'good');
+    toast('Purchase recorded. The card stays watched.', 'good');
     location.reload();
   } catch (err) { toast(`Could not record the purchase: ${err.message}`, 'bad'); }
 });
@@ -1641,7 +1666,7 @@ wire('btn-undo-purchase', async event => {
 });
 
 wire('btn-give-up-product', async event => {
-  if (!confirm('Give up on this? It comes off the board, but every listing, price and history row is kept, so it is not gone for good.')) return;
+  if (!confirm('Remove this card? It leaves the board, but its listings and history are kept and can be restored.')) return;
   const productId = Number(event.currentTarget.dataset.product);
   try {
     await api(`/api/products/${productId}`, { method: 'DELETE' });
@@ -1649,6 +1674,33 @@ wire('btn-give-up-product', async event => {
     location.href = '/';
   } catch (err) { toast(`Could not archive: ${err.message}`, 'bad'); }
 });
+
+document.querySelectorAll('[data-archive-product]').forEach(button => button.addEventListener('click', async () => {
+  const id = button.dataset.archiveProduct;
+  if (!confirm('Remove this card? It leaves the board, but its listings and history are kept and can be restored.')) return;
+  try {
+    await api(`/api/products/${id}`, { method: 'DELETE' });
+    location.href = '/';
+  } catch (err) { toast(`Could not remove card: ${err.message}`, 'bad'); }
+}));
+
+for (const [attribute, status, archived, message] of [
+  ['data-pause-product', 'PARKED', undefined, 'Watch paused.'],
+  ['data-resume-product', 'ACTIVE', undefined, 'Watch resumed.'],
+  ['data-restore-product', undefined, 0, 'Card restored.']
+]) {
+  document.querySelectorAll(`[${attribute}]`).forEach(button => button.addEventListener('click', async () => {
+    const id = button.getAttribute(attribute);
+    try {
+      await api(`/api/products/${id}`, { method: 'PATCH', body: {
+        ...(status ? { status: button.dataset.resumeStatus || status } : {}),
+        ...(archived !== undefined ? { archived } : {})
+      }});
+      location.href = `/products/${id}`;
+      toast(message, 'good');
+    } catch (err) { toast(`Could not update watch: ${err.message}`, 'bad'); }
+  }));
+}
 
 wire('btn-delete-product', () => {
   document.getElementById('del-confirm-name').value = '';
@@ -1681,9 +1733,9 @@ wire('btn-edit-product', () => document.getElementById('product-dialog').showMod
 wire('ep-save', async () => {
   const productId = Number(location.pathname.split('/').pop());
   const text = ['name', 'model', 'brand', 'category', 'generation', 'verdict', 'status', 'vesa',
-    'fit_notes', 'notes', 'lowest_known_notes', 'lowest_known_date', 'lowest_known_retailer'];
+    'fit_notes', 'notes', 'lowest_known_notes', 'lowest_known_date', 'lowest_known_retailer', 'quantity_unit'];
   const numeric = ['trigger_price', 'excellent_price', 'historical_low_price',
-    'lowest_known_price', 'width_mm', 'height_mm', 'depth_mm', 'weight_kg'];
+    'lowest_known_price', 'width_mm', 'height_mm', 'depth_mm', 'weight_kg', 'quantity'];
   const body = {};
   for (const key of text) {
     const el = document.getElementById(`ep-${key}`);
@@ -2211,4 +2263,17 @@ wire('cd-save', async () => {
     toast('Added to the group.', 'good');
     location.reload();
   } catch (err) { toast(`Could not add candidate: ${err.message}`, 'bad'); }
+});
+
+wire('household-settings-form', async event => {
+  event.preventDefault();
+  const postcode = document.getElementById('household-postcode').value.trim();
+  const pickup_radius_km = Number(document.getElementById('household-pickup-radius').value);
+  try {
+    await api('/api/household-settings', { method: 'PATCH', body: {
+      postcode: postcode || null, pickup_radius_km
+    }});
+    toast('Local area saved.', 'good');
+    location.reload();
+  } catch (err) { toast(`Could not save local area: ${err.message}`, 'bad'); }
 });

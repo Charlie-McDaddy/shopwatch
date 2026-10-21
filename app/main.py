@@ -35,6 +35,7 @@ from . import (
     retailers,
     store,
     url_intake,
+    wayback,
 )
 from .config import load_config
 from .db import backup, migrate, session, utcnow
@@ -231,7 +232,9 @@ def jsonable(value: Any) -> Any:
 def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> Any:
     with session() as conn:
         products = store.list_products(
-            conn, status=None if status == "ALL" else status, exclude_grouped=True
+            conn, include_archived=status == "ARCHIVED",
+            status=None if status == "ALL" else status,
+            exclude_grouped=True,
         )
         for product in products:
             product["listings"] = store.listings_for_product(conn, product, sort=sort)
@@ -241,13 +244,15 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
         groups = store.list_groups(conn) if status in ("ACTIVE", "ALL") else []
         counts = store.status_counts(conn)
         retailer_list = store.list_retailers(conn)
+        household_settings = store.household_settings(conn)
         # Whether the board is empty for THIS tab (nothing PARKED, say) is not the same
         # question as whether this is a brand-new install with nothing in it at all -
         # the onboarding panel belongs only to the second case, regardless of which tab
         # happens to be selected when someone lands here with an empty database.
-        is_new_install = counts.get("ALL", 0) == 0 and not conn.execute(
-            "SELECT 1 FROM watch_groups LIMIT 1"
-        ).fetchone()
+        is_new_install = (
+            not conn.execute("SELECT 1 FROM products LIMIT 1").fetchone()
+            and not conn.execute("SELECT 1 FROM watch_groups LIMIT 1").fetchone()
+        )
     return templates.TemplateResponse(
         request,
         "board.html",
@@ -255,11 +260,13 @@ def board(request: Request, sort: str = "delivered", status: str = "ACTIVE") -> 
             "products": products,
             "groups": groups,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "sort": sort,
             "status": status,
             "counts": counts,
             "is_new_install": bool(is_new_install),
             "statuses": store.STATUSES,
+            "board_statuses": store.STATUSES + ["ARCHIVED", "ALL"],
             "config": load_config(),
             "classes": pricing.CLASS_LABELS,
             "version": ASSET_VERSION,
@@ -281,9 +288,11 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
         group = store.get_group(conn, product["group_id"]) if product["group_id"] else None
         retailer_list = store.list_retailers(conn)
         history = store.price_history(conn, product_id, limit=200)
+        wayback_evidence, wayback_coverage = wayback.history(conn, product_id)
         rules = [dict(r) for r in conn.execute(
             "SELECT * FROM alert_rules WHERE product_id = ?", (product_id,))]
         cats = store.categories(conn)
+        household_settings = store.household_settings(conn)
     return templates.TemplateResponse(
         request,
         "product.html",
@@ -291,7 +300,10 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
             "product": product,
             "group": dict(group) if group else None,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "history": history,
+            "wayback_evidence": wayback_evidence,
+            "wayback_coverage": wayback_coverage,
             "rules": rules,
             "categories": cats,
             "sort": sort,
@@ -310,6 +322,23 @@ def product_page(request: Request, product_id: int, sort: str = "delivered") -> 
     )
 
 
+@app.get("/settings", response_class=HTMLResponse)
+def household_settings_page(request: Request) -> Any:
+    with session() as conn:
+        settings = store.household_settings(conn)
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "settings": settings,
+            "version": ASSET_VERSION,
+            "app_version": __version__,
+            "git_sha": GIT_SHA,
+            "git_sha_is_deploy": GIT_SHA_IS_DEPLOY,
+        },
+    )
+
+
 @app.get("/groups/{group_id}", response_class=HTMLResponse)
 def group_page(request: Request, group_id: int, sort: str = "delivered") -> Any:
     with session() as conn:
@@ -317,12 +346,14 @@ def group_page(request: Request, group_id: int, sort: str = "delivered") -> Any:
         if group is None:
             raise HTTPException(404, "no such group")
         retailer_list = store.list_retailers(conn)
+        household_settings = store.household_settings(conn)
     return templates.TemplateResponse(
         request,
         "group.html",
         {
             "group": group,
             "retailers": retailer_list,
+            "household_settings": household_settings,
             "sort": sort,
             "classes": pricing.CLASS_LABELS,
             "config": load_config(),
@@ -444,6 +475,21 @@ def download_llm_helper_zip(request: Request, url: str | None = Query(None)) -> 
         content=zip_bytes, media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="shopwatch-llm-helper.zip"'},
     )
+
+
+@app.get("/api/household-settings")
+def api_household_settings() -> Any:
+    with session() as conn:
+        return store.household_settings(conn)
+
+
+@app.patch("/api/household-settings")
+def api_update_household_settings(payload: dict = Body(...)) -> Any:
+    with session() as conn:
+        try:
+            return store.update_household_settings(conn, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/products")
@@ -603,7 +649,10 @@ def api_update_product(product_id: int, payload: dict = Body(...)) -> Any:
     with session() as conn:
         if store.get_product(conn, product_id) is None:
             raise HTTPException(404, "no such product")
-        store.update_product(conn, product_id, payload)
+        try:
+            store.update_product(conn, product_id, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return jsonable(store.product_view(conn, product_id))
 
 
@@ -643,10 +692,10 @@ def api_delete_product_permanently(product_id: int) -> Any:
 
 @app.post("/api/products/{product_id}/purchase", status_code=201)
 def api_record_purchase(product_id: int, payload: dict = Body(...)) -> Any:
-    """Mark a product bought. Moves it to PURCHASED and stops its alerts.
+    """Record a purchase while keeping the product's card watched.
 
-    Set `price_protection_until` (YYYY-MM-DD) to keep watching inside a retailer's price
-    guarantee window; leave it off and the watch stops for this product entirely.
+    Set `price_protection_until` (YYYY-MM-DD) to enable purchase-specific price
+    protection alerts in addition to the card's ordinary watch.
     """
     with session() as conn:
         if store.get_product(conn, product_id) is None:
@@ -720,6 +769,10 @@ def api_create_listing(product_id: int, payload: dict = Body(...)) -> Any:
                 )
             except provenance.FieldError as exc:
                 raise HTTPException(400, str(exc)) from exc
+            if "freight" in values:
+                store.confirm_freight_for_household(conn, listing_id)
+            if "pickup_status" in values or "pickup_location" in values:
+                store.confirm_pickup_for_household(conn, listing_id)
             store.record_observation(conn, listing_id, source="ui")
         provenance.sync_verification_from_provenance(conn, listing_id)
         row = conn.execute(
@@ -730,7 +783,10 @@ def api_create_listing(product_id: int, payload: dict = Body(...)) -> Any:
         ).fetchone()
         product = store.get_product(conn, product_id)
         return jsonable(
-            store.enrich_listing(conn, row, dict(product), load_config().unresolved_freight_penalty)
+            store.enrich_listing(
+                conn, row, dict(product), load_config().unresolved_freight_penalty,
+                store.household_settings(conn)["postcode"],
+            )
         )
 
 
@@ -755,20 +811,24 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
          whatever it finds under the ordinary LIVE provenance state.
       2. Otherwise (no adapter, or the adapter's fetch failed - bot protection, a
          config with scraping disabled, a dead link), queue a one-off research job
-         scoped to this single URL via the existing research-job pipeline
-         (app/research.py, deploy/research-runner.py), so a human doesn't have to
-         separately go and check it. Its finding still lands through the ordinary
-         POST /api/import path, same as every other research job. A job already
-         running for this product (JobAlreadyRunning) is not an error here - the
-         listing with its URL still stands, and the running job will surface on the
-         product page as usual.
+         scoped to this single URL via the existing research-job pipeline. Marketplace
+         URLs stay manual-only until research results can preserve seller identity;
+         an ambiguous marketplace price must not be attached to a chosen offer. A job
+         already running for this product (JobAlreadyRunning) is not an error here.
     """
-    url = (payload.get("url") or "").strip()
+    raw_url = payload.get("url")
+    if not isinstance(raw_url, str):
+        raise HTTPException(400, "url must be text")
+    url = raw_url.strip()
     if not url:
         raise HTTPException(400, "url is required")
     domain = url_intake.bare_domain(url)
     if not domain:
-        raise HTTPException(400, "url must be a full http:// or https:// address")
+        raise HTTPException(400, "url must be a public http:// or https:// address")
+    try:
+        offer_identity = url_intake.marketplace_identity(url, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     with session() as conn:
         product = store.get_product(conn, product_id)
@@ -791,43 +851,58 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                 " (Retailers page) if you want to track it again."
             )
 
-        existing = store.find_listing(conn, product_id, retailer["id"], url)
+        offer_key = offer_identity["offer_key"] if url_intake.is_marketplace_url(url) else None
+        existing = store.find_listing(conn, product_id, retailer["id"], url, offer_key=offer_key)
         if existing is None:
-            listing_id = store.create_listing(
-                conn, {"product_id": product_id, "retailer_id": retailer["id"], "url": url}
-            )
+            listing_id = store.create_listing(conn, {
+                "product_id": product_id, "retailer_id": retailer["id"], "url": url,
+                **offer_identity,
+            })
         else:
             listing_id = existing["id"]
 
         scraped = False
+        check_error = None
         if adapter_cls is not None:
             try:
                 observation = adapter_cls().check(url, expected_model=product["model"])
-            except retailers.FetchError:
+            except retailers.FetchError as exc:
                 observation = None
+                check_error = str(exc)
+            conn.execute(
+                "UPDATE listings SET check_error = ?, updated_at = ? WHERE id = ?",
+                (check_error, utcnow(), listing_id),
+            )
             if observation is not None:
-                values = observation.to_values()
+                mismatch = next((w for w in observation.warnings if "model mismatch" in w), None)
+                if mismatch:
+                    conn.execute(
+                        "UPDATE listings SET check_error = ?, last_checked_at = ?,"
+                        " updated_at = ? WHERE id = ?",
+                        (mismatch, utcnow(), utcnow(), listing_id),
+                    )
+                    provenance.set_verification(
+                        conn, listing_id, "model", provenance.FLAGGED, mismatch
+                    )
+                values = {} if mismatch else observation.to_values()
                 if values:
-                    provenance.apply_values(
+                    applied = provenance.apply_values(
                         conn, listing_id, values, state=provenance.LIVE, source=adapter_cls.slug
                     )
+                    if "freight" in applied["written"]:
+                        store.clear_freight_location_confirmation(conn, listing_id)
+                    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+                        store.clear_pickup_location_confirmation(conn, listing_id)
                     conn.execute(
                         "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
                         (utcnow(), utcnow(), listing_id),
                     )
                     provenance.sync_verification_from_provenance(conn, listing_id)
-                    mismatch = next(
-                        (w for w in observation.warnings if "model mismatch" in w), None
-                    )
-                    if mismatch:
-                        provenance.set_verification(
-                            conn, listing_id, "model", provenance.FLAGGED, mismatch
-                        )
                     store.record_observation(conn, listing_id, source=adapter_cls.slug)
-                    scraped = True
+                    scraped = not mismatch
 
         research_job = None
-        if not scraped:
+        if not scraped and not url_intake.is_marketplace_url(url):
             try:
                 job_id = research.create_job(
                     conn, product_id, [retailer["id"]], urls={retailer["id"]: url}
@@ -843,7 +918,8 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
             (listing_id,),
         ).fetchone()
         listing = store.enrich_listing(
-            conn, row, dict(product), load_config().unresolved_freight_penalty
+            conn, row, dict(product), load_config().unresolved_freight_penalty,
+            store.household_settings(conn)["postcode"],
         )
         return {
             "listing": jsonable(listing),
@@ -887,6 +963,16 @@ def api_update_listing(listing_id: int, payload: dict = Body(...)) -> Any:
             )
         except provenance.FieldError as exc:
             raise HTTPException(400, str(exc)) from exc
+        if "freight" in applied["written"]:
+            if manual:
+                store.confirm_freight_for_household(conn, listing_id)
+            else:
+                store.clear_freight_location_confirmation(conn, listing_id)
+        if {"pickup_status", "pickup_location"} & set(applied["written"]):
+            if manual:
+                store.confirm_pickup_for_household(conn, listing_id)
+            else:
+                store.clear_pickup_location_confirmation(conn, listing_id)
         conn.execute(
             "UPDATE listings SET last_checked_at = ?, updated_at = ? WHERE id = ?",
             (utcnow(), utcnow(), listing_id),
@@ -902,7 +988,8 @@ def api_update_listing(listing_id: int, payload: dict = Body(...)) -> Any:
             (listing_id,),
         ).fetchone()
         listing = store.enrich_listing(
-            conn, fresh, dict(product), load_config().unresolved_freight_penalty
+            conn, fresh, dict(product), load_config().unresolved_freight_penalty,
+            store.household_settings(conn)["postcode"],
         )
         # The page leads with a sentence answering "should I buy this yet". Editing a
         # freight figure can change that answer, so the summary has to come back with
@@ -946,7 +1033,8 @@ def _listing_view(conn, listing_id: int) -> dict[str, Any] | None:
         return None
     product = store.get_product(conn, row["product_id"])
     return store.enrich_listing(
-        conn, row, dict(product), load_config().unresolved_freight_penalty
+        conn, row, dict(product), load_config().unresolved_freight_penalty,
+        store.household_settings(conn)["postcode"],
     )
 
 
@@ -1093,6 +1181,91 @@ def api_price_history(product_id: int, limit: int = Query(500, le=5000)) -> Any:
         if store.get_product(conn, product_id) is None:
             raise HTTPException(404, "no such product")
         return store.price_history(conn, product_id, limit)
+
+
+@app.post("/api/products/{product_id}/wayback-history")
+def api_check_wayback_history(product_id: int) -> Any:
+    """Check bounded archived evidence for the product's existing exact listing URLs."""
+    with session() as conn:
+        product = store.get_product(conn, product_id)
+        if product is None:
+            raise HTTPException(404, "no such product")
+        model = product["model"]
+        url_listing_count = conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE product_id = ? AND active = 1"
+            " AND url IS NOT NULL AND url != ''",
+            (product_id,),
+        ).fetchone()[0]
+        listings = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT l.id, l.url, r.name AS retailer_name FROM listings l"
+                " JOIN retailers r ON r.id = l.retailer_id"
+                " WHERE l.product_id = ? AND l.active = 1 AND l.url IS NOT NULL AND l.url != ''"
+                " ORDER BY l.id LIMIT ?",
+                (product_id, wayback.MAX_LISTINGS),
+            )
+        ]
+    checked_at = utcnow()
+    results = []
+    budget = wayback.RequestBudget()
+    for listing in listings:
+        try:
+            result = wayback.lookup_listing(listing["url"], model, budget)
+        except Exception:
+            result = {
+                "status": "blocked",
+                "note": "Wayback could not be checked safely.",
+                "snapshots": [],
+            }
+        results.append((listing, result))
+
+    with session() as conn:
+        if store.get_product(conn, product_id) is None:
+            raise HTTPException(404, "no such product")
+        if not listings:
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                None,
+                "",
+                model,
+                {
+                    "status": "no_snapshot",
+                    "note": "No active listing URLs are available to check.",
+                    "snapshots": [],
+                },
+                checked_at,
+            )
+        if url_listing_count > len(listings):
+            skipped = url_listing_count - len(listings)
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                None,
+                "",
+                model,
+                {
+                    "status": "blocked",
+                    "note": (
+                        f"Lookup limit reached; {skipped} additional listing URLs were not checked."
+                    ),
+                    "snapshots": [],
+                },
+                checked_at,
+            )
+        for listing, result in results:
+            wayback.persist_lookup(
+                conn,
+                product_id,
+                listing["id"],
+                listing["url"],
+                model,
+                result,
+                checked_at,
+            )
+        evidence, coverage = wayback.history(conn, product_id)
+        return {"checked": len(listings), "evidence_count": len(evidence), "coverage": coverage}
 
 
 @app.post("/api/price-watch/run")
@@ -1247,10 +1420,9 @@ def api_complete_research_job(job_id: int, payload: dict = Body(...)) -> Any:
 
 # ------------------------------------------------------------------- llm jobs (wizard)
 #
-# Same job-lifecycle shape as research jobs above, claimed by a completely different
-# kind of runner: not a fixed host script on opti, but tools/llm-helper.py running on
-# WHOEVER's own machine, using their own already-authenticated Claude Code or Codex CLI.
-# This server never holds that credential and never needs one of its own.
+# Same job-lifecycle shape as research jobs above. The fixed host runner claims these
+# jobs too, using the host's existing Claude Code session; the CLI credential stays
+# outside the web container.
 
 
 @app.post("/api/llm-jobs", status_code=202)
@@ -1276,10 +1448,10 @@ def api_get_llm_job(job_id: int) -> Any:
 
 @app.post("/api/llm-jobs/claim")
 def api_claim_llm_job() -> Any:
-    """Called only by a user's own tools/llm-helper.py, never by the wizard UI.
+    """Claimed by the host runner (or a compatible standalone helper).
 
     Atomically claims the oldest QUEUED job. Returns null when there is nothing to do -
-    the runner is expected to poll this on its own short interval while it is running.
+    the host runner polls this alongside other research queues.
     """
     with session() as conn:
         return jsonable(llm_jobs.claim_next_queued(conn))
@@ -1287,7 +1459,7 @@ def api_claim_llm_job() -> Any:
 
 @app.post("/api/llm-jobs/{job_id}/complete")
 def api_complete_llm_job(job_id: int, payload: dict = Body(...)) -> Any:
-    """Called only by tools/llm-helper.py, exactly once per job."""
+    """Report the result from the host runner or compatible standalone helper."""
     status = payload.get("status")
     with session() as conn:
         if llm_jobs.get_job(conn, job_id) is None:

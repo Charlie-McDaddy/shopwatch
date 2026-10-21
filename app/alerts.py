@@ -88,14 +88,11 @@ def evaluate_product(
 ) -> list[Alert]:
     """Every alert this product would raise right now.
 
-    A product that is not ACTIVE raises nothing from its normal rules: once it is bought
-    or parked, a "trigger met" notification is noise. The one exception is an open
-    price-protection window on a purchase, which raises its own kind of alert.
+    A purchased card remains watched. Parked and archived cards raise no alerts; an
+    open price-protection window can also raise its purchase-specific alert.
     """
     status = product.get("status", "ACTIVE")
-    if status != "ACTIVE":
-        if status == "PURCHASED" and product.get("protection_open"):
-            return _protection_alerts(conn, product)
+    if product.get("archived") or status == "PARKED":
         return []
 
     rules = conn.execute(
@@ -108,12 +105,9 @@ def evaluate_product(
             delivered = listing["delivered"]
             if not delivered.known:
                 continue
-            # A ruled-out listing never alerts. best_listing() already refuses to
-            # nominate one, and an alert engine that disagrees with the board is worse
-            # than either: the page shows the price struck through while the phone says
-            # act on it. Price watching deliberately continues for a ruled-out listing
-            # so the history keeps accruing; pushing that history at you does not.
-            if listing.get("ruled_out"):
+            # An excluded listing or flagged model never alerts. best_listing() applies
+            # the same rule, so the board and phone cannot recommend different offers.
+            if not pricing.listing_is_comparable(listing):
                 continue
             if (listing["condition"] or "NEW").upper() not in allowed:
                 continue
@@ -143,6 +137,15 @@ def evaluate_product(
                     reason=f"delivered ${delivered.value:.0f} <= ${rule['max_delivered']:.0f}",
                 )
             )
+    if status == "PURCHASED" and product.get("protection_open"):
+        protection = _protection_alerts(conn, product)
+        # If both paths describe the same price movement, retain the useful guarantee
+        # window explanation and drop the generic target alert.
+        for protected in protection:
+            alerts = [a for a in alerts if not (
+                a.listing_id == protected.listing_id and a.delivered == protected.delivered
+            )]
+        alerts.extend(protection)
     return alerts
 
 
@@ -163,7 +166,7 @@ def _protection_alerts(conn: sqlite3.Connection, product: Mapping[str, Any]) -> 
             continue
         # Same rule as the buy alerts: a listing you have rejected cannot be the
         # evidence for chasing a price guarantee against it.
-        if listing.get("ruled_out"):
+        if not pricing.listing_is_comparable(listing):
             continue
         if delivered.value >= paid:
             continue
@@ -218,7 +221,19 @@ def record_fired(conn: sqlite3.Connection, alert: Alert) -> None:
             "UPDATE purchases SET last_alert_price = ? WHERE id = ?",
             (alert.delivered, -alert.rule_id),
         )
+        conn.execute(
+            "UPDATE alert_rules SET last_fired_at = ?, last_fired_price = ?"
+            " WHERE product_id = (SELECT product_id FROM purchases WHERE id = ?)"
+            " AND enabled = 1",
+            (utcnow(), alert.delivered, -alert.rule_id),
+        )
         return
+    conn.execute(
+        "UPDATE purchases SET last_alert_price = ? WHERE product_id = ("
+        " SELECT product_id FROM alert_rules WHERE id = ?)"
+        " AND price_protection_until IS NOT NULL",
+        (alert.delivered, alert.rule_id),
+    )
     conn.execute(
         "UPDATE alert_rules SET last_fired_at = ?, last_fired_price = ? WHERE id = ?",
         (utcnow(), alert.delivered, alert.rule_id),

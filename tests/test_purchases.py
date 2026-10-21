@@ -80,13 +80,12 @@ def test_a_purchase_can_name_a_retailer_that_was_never_on_the_board(armed):
         assert purchase["listing_id"] is None
 
 
-def test_buying_it_stops_the_alerts(armed):
-    """The point of the feature. Compare with test_the_control_an_active_product_does_alert."""
+def test_a_purchased_product_keeps_normal_alerts(armed):
     with connect(armed) as conn:
         product, listing = crowdshop(conn)
         store.record_purchase(conn, product["id"], {"listing_id": listing["id"], "price_paid": 894})
         conn.commit()
-        assert alerts.evaluate_all(conn) == []
+        assert len(alerts.evaluate_all(conn)) == 1
 
 
 def test_a_parked_product_stops_alerting_too(armed):
@@ -97,7 +96,7 @@ def test_a_parked_product_stops_alerting_too(armed):
         assert alerts.evaluate_all(conn) == []
 
 
-def test_the_watch_skips_a_purchased_product(armed):
+def test_the_watch_keeps_checking_a_purchased_product(armed):
     with connect(armed) as conn:
         conn.execute("UPDATE listings SET url = 'https://example.invalid/x'")
         conn.commit()
@@ -108,7 +107,7 @@ def test_the_watch_skips_a_purchased_product(armed):
         product, listing = crowdshop(conn)
         store.record_purchase(conn, product["id"], {"listing_id": listing["id"], "price_paid": 894})
         conn.commit()
-    assert price_watch.run(send_alerts=False)["checked"] == 0
+    assert price_watch.run(send_alerts=False)["checked"] == 5
 
 
 # ------------------------------------------------------------------- price protection
@@ -135,7 +134,9 @@ def test_protection_alerts_when_it_drops_below_what_you_paid(armed):
         )
         conn.commit()
 
-        assert alerts.evaluate_all(conn) == [], "nothing is cheaper than the price paid yet"
+        assert all(a.rule_name != "Price protection" for a in alerts.evaluate_all(conn)), (
+            "normal target alerts remain armed before the price beats the purchase"
+        )
 
         provenance.set_field(conn, listing["id"], "advertised_price", 780.0,
                              state=provenance.MANUAL)
@@ -160,7 +161,7 @@ def test_protection_ignores_an_unconfirmed_cheaper_price(armed):
         )
         provenance.set_field(conn, hn["id"], "advertised_price", 700.0, state=provenance.MANUAL)
         conn.commit()
-        assert alerts.evaluate_all(conn) == [], (
+        assert all(a.rule_name != "Price protection" for a in alerts.evaluate_all(conn)), (
             "chasing a price guarantee on an unconfirmed figure wastes a trip"
         )
 
@@ -175,7 +176,7 @@ def test_protection_stops_at_the_end_of_the_window(armed):
         provenance.set_field(conn, listing["id"], "advertised_price", 780.0,
                              state=provenance.MANUAL)
         conn.commit()
-        assert alerts.evaluate_all(conn) == []
+        assert all(a.rule_name != "Price protection" for a in alerts.evaluate_all(conn))
 
 
 def test_protection_does_not_re_alert_on_a_trivial_move(armed):
@@ -188,7 +189,8 @@ def test_protection_does_not_re_alert_on_a_trivial_move(armed):
         provenance.set_field(conn, listing["id"], "advertised_price", 780.0,
                              state=provenance.MANUAL)
         conn.commit()
-        first = alerts.evaluate_all(conn)
+        first = [a for a in alerts.evaluate_all(conn) if a.rule_name == "Price protection"]
+        assert len(first) == 1
         alerts.record_fired(conn, first[0])
         conn.commit()
 
@@ -236,6 +238,33 @@ def test_undo_restores_active_but_keeps_the_history(armed):
 def test_undo_on_a_product_that_was_never_bought(conn):
     pid = store.create_product(conn, {"name": "Thing", "model": "THING-1"})
     assert store.undo_purchase(conn, pid) is False
+
+
+
+def test_paused_and_archived_purchases_stop_checks_and_alerts(armed):
+    with connect(armed) as conn:
+        conn.execute("UPDATE listings SET url = 'https://example.invalid/x'")
+        product, listing = crowdshop(conn)
+        store.record_purchase(conn, product["id"], {"listing_id": listing["id"], "price_paid": 894})
+        store.update_product(conn, product["id"], {"status": "PARKED"})
+        conn.commit()
+        assert alerts.evaluate_all(conn) == []
+
+    assert price_watch.run(send_alerts=False)["checked"] == 0
+
+    with connect(armed) as conn:
+        product, _ = crowdshop(conn)
+        store.update_product(conn, product["id"], {"status": "PURCHASED"})
+        conn.commit()
+        assert len(alerts.evaluate_all(conn)) == 1
+    assert price_watch.run(send_alerts=False)["checked"] == 5
+
+    with connect(armed) as conn:
+        product, _ = crowdshop(conn)
+        store.update_product(conn, product["id"], {"archived": 1})
+        conn.commit()
+        assert alerts.evaluate_all(conn) == []
+    assert price_watch.run(send_alerts=False)["checked"] == 0
 
 
 # ------------------------------------------------------------------ many products

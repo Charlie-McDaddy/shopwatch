@@ -1,13 +1,9 @@
 """LLM helper jobs: turn a rough product description into a short list of real
 candidate model numbers, for the "Track something new" wizard's model field.
 
-A job's own lifecycle lives here, in this container - same split as app/research.py.
-The actual LLM call never runs in this process: it is claimed over this same HTTP API
-by tools/llm-helper.py, a small standalone script the USER runs on their own machine,
-authenticated with whatever Claude Code or Codex CLI login is already active there. No
-API key, no credential of any kind, ever needs to exist on this server or in this
-container - the whole point of this design is that it costs the operator nothing beyond
-what they already pay for their own CLI subscription.
+A job's lifecycle lives here, in this container - same split as app/research.py. The
+actual CLI call runs on the host research runner, outside this container, through this
+same HTTP API. No CLI credential enters the web container.
 
 "Exact model" is used to match price imports (store.normalise_model), so a wrong
 candidate silently accepted would corrupt matching later. Every candidate is therefore

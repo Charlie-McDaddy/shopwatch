@@ -24,7 +24,7 @@
      group actually had notes set. #}
   {% if group.notes %}<p class="muted" style="margin:0 20px 12px">{{ group.notes }}</p>{% endif %}
   {% if group.archived %}
-    <p class="verdict bought">Resolved - a purchase in this group archived the rest.</p>
+    <p class="verdict bought">Group archived.</p>
   {% endif %}
 
   {{ c.ruler({"scale": group.scale, "best_listing": none}) }}
@@ -45,7 +45,9 @@
               <small>{% if member.best_resolved %}delivered{% else %}before freight{% endif %}, {{ member.best_retailer }}</small>
             {%- endif %}
           </span>
-          <span class="tag">{{ member.trigger_price|money if member.trigger_price else 'no trigger set' }}</span>
+          <span class="tag">{{ member.trigger_price|money if member.trigger_price else 'no trigger set' }}
+            <small>{% if household_settings.postcode %}Delivery to {{ household_settings.postcode }}; pickup distance and stock unverified{% else %}Delivery and pickup availability unknown{% endif %}</small>
+          </span>
         </a>
       </div>
     {% else %}

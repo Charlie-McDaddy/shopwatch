@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
-from . import provenance, store
+from . import provenance, store, url_intake, wayback
 from .db import utcnow
 
 # Finding keys that map onto listing fields.
@@ -84,13 +85,19 @@ def import_finding(
 
     retailer = store.ensure_retailer(conn, retailer_name)
     url = finding.get("source_url") or finding.get("url")
-    listing = store.find_listing(conn, product["id"], retailer["id"], url)
+    identity = url_intake.marketplace_identity(url, finding) if url else {
+        "seller_name": None, "seller_id": None, "offer_id": None, "offer_key": ""
+    }
+    offer_key = identity["offer_key"] if url and url_intake.is_marketplace_url(url) else None
+    listing = store.find_listing(
+        conn, product["id"], retailer["id"], url, offer_key=offer_key
+    )
     created = False
     if listing is None:
-        listing_id = store.create_listing(
-            conn,
-            {"product_id": product["id"], "retailer_id": retailer["id"], "url": url},
-        )
+        listing_id = store.create_listing(conn, {
+            "product_id": product["id"], "retailer_id": retailer["id"], "url": url,
+            **identity,
+        })
         created = True
     else:
         listing_id = listing["id"]
@@ -109,6 +116,10 @@ def import_finding(
         state=state,
         source=source or finding.get("source") or "import",
     )
+    if "freight" in applied["written"]:
+        store.clear_freight_location_confirmation(conn, listing_id)
+    if {"pickup_status", "pickup_location"} & set(applied["written"]):
+        store.clear_pickup_location_confirmation(conn, listing_id)
 
     checked_at = finding.get("checked_at") or utcnow()
     conn.execute(
@@ -195,9 +206,14 @@ def export_all(conn: sqlite3.Connection, include_history: bool = True) -> dict[s
         "listing_verification": rows("SELECT * FROM listing_verification ORDER BY listing_id"),
         "alert_rules": rows("SELECT * FROM alert_rules ORDER BY id"),
         "category_specifications": rows("SELECT * FROM category_specifications ORDER BY id"),
+        "household_settings": store.household_settings(conn),
     }
     if include_history:
         data["price_history"] = rows("SELECT * FROM price_history ORDER BY id")
+        data["wayback_checks"] = rows("SELECT * FROM wayback_checks ORDER BY id")
+        data["wayback_price_evidence"] = rows(
+            "SELECT * FROM wayback_price_evidence ORDER BY id"
+        )
     return data
 
 
@@ -210,6 +226,12 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
     History rows are appended, de-duplicated on (listing, timestamp, price).
     """
     report = {"products": 0, "listings": 0, "history": 0, "preserved_manual": 0, "errors": []}
+
+    if isinstance(data.get("household_settings"), Mapping):
+        try:
+            store.update_household_settings(conn, data["household_settings"])
+        except ValueError as exc:
+            report["errors"].append(f"household_settings: {exc}")
 
     for spec in data.get("category_specifications", []):
         conn.execute(
@@ -251,16 +273,19 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
         if pid is None or rid is None:
             report["errors"].append(f"listing {snap.get('id')}: unknown product or retailer")
             continue
-        existing = store.find_listing(conn, pid, rid, snap.get("url"))
-        listing_id = (
-            existing["id"]
-            if existing
-            else store.create_listing(
-                conn, {"product_id": pid, "retailer_id": rid, "url": snap.get("url")}
-            )
-        )
+        offer_key = snap.get("offer_key", "")
+        snap_url = snap.get("url")
+        lookup_key = offer_key if snap_url and url_intake.is_marketplace_url(snap_url) else None
+        existing = store.find_listing(conn, pid, rid, snap_url, offer_key=lookup_key)
+        listing_id = existing["id"] if existing else store.create_listing(conn, {
+            "product_id": pid, "retailer_id": rid, "url": snap.get("url"),
+            **{key: snap.get(key) for key in ("seller_name", "seller_id", "offer_id")},
+            "offer_key": offer_key,
+        })
         listing_ids[snap["id"]] = listing_id
 
+        freight_written = False
+        pickup_written = False
         for field in provenance.TRACKED_FIELDS:
             if field not in snap:
                 continue
@@ -274,8 +299,24 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
                 note=incoming.get("note"),
                 lock=True if locked else None,
             )
+            if field == "freight":
+                freight_written = wrote
+            if field in {"pickup_status", "pickup_location"}:
+                pickup_written = pickup_written or wrote
             if not wrote:
                 report["preserved_manual"] += 1
+        if freight_written:
+            # Older snapshots have no location marker, so their quote must remain
+            # unassociated with the destination household's postcode.
+            conn.execute(
+                "UPDATE listings SET freight_postcode = ? WHERE id = ?",
+                (snap.get("freight_postcode"), listing_id),
+            )
+        if pickup_written:
+            conn.execute(
+                "UPDATE listings SET pickup_postcode = ? WHERE id = ?",
+                (snap.get("pickup_postcode"), listing_id),
+            )
         conn.execute(
             "UPDATE listings SET last_checked_at = COALESCE(?, last_checked_at), updated_at = ?"
             " WHERE id = ?",
@@ -317,6 +358,96 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
             ),
         )
         report["history"] += 1
+
+    # Wayback evidence is sourced archive history. Keep it with history snapshots, remap
+    # local ids by model/listing identity, and de-duplicate repeated restores.
+    wayback_check_ids: dict[Any, int] = {}
+    wayback_checks_by_id = {check.get("id"): check for check in data.get("wayback_checks", [])}
+    for check in data.get("wayback_checks", []):
+        pid = product_ids.get(check.get("product_id"))
+        if pid is None:
+            continue
+        checked_at = check.get("checked_at")
+        try:
+            datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            continue
+        status = check.get("status")
+        if status not in {"evidence", "no_snapshot", "no_usable_price", "blocked"}:
+            status = "blocked"
+        original_url = str(check.get("original_url") or "")[:2048]
+        note = str(check.get("note") or "")[:500]
+        lid = listing_ids.get(check.get("listing_id"))
+        duplicate = conn.execute(
+            "SELECT id FROM wayback_checks WHERE product_id = ?"
+            " AND IFNULL(listing_id, -1) = IFNULL(?, -1) AND original_url = ?"
+            " AND checked_at = ? AND status = ? AND note = ?",
+            (pid, lid, original_url, checked_at, status, note),
+        ).fetchone()
+        if duplicate:
+            wayback_check_ids[check.get("id")] = duplicate["id"]
+            continue
+        cursor = conn.execute(
+            "INSERT INTO wayback_checks (product_id, listing_id, original_url, checked_at,"
+            " status, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, lid, original_url, checked_at, status, note),
+        )
+        wayback_check_ids[check.get("id")] = int(cursor.lastrowid)
+
+    for evidence in data.get("wayback_price_evidence", []):
+        pid = product_ids.get(evidence.get("product_id"))
+        check_id = wayback_check_ids.get(evidence.get("check_id"))
+        if pid is None or check_id is None:
+            continue
+        lid = listing_ids.get(evidence.get("listing_id"))
+        check = wayback_checks_by_id.get(evidence.get("check_id"))
+        original_url = evidence.get("original_url") or ""
+        if (
+            not check
+            or check.get("status") != "evidence"
+            or original_url != (check.get("original_url") or "")
+        ):
+            continue
+        model = store.get_product(conn, pid)["model"]
+        clean = wayback.valid_archive_snapshot(original_url, model, {
+            "snapshot_url": evidence.get("snapshot_url"),
+            "captured_at": evidence.get("captured_at"),
+            "model": evidence.get("matched_model"),
+            "advertised_price": evidence.get("advertised_price"),
+            "currency": evidence.get("currency"),
+            "price_context": evidence.get("price_context"),
+        })
+        if clean is None:
+            continue
+        duplicate = conn.execute(
+            "SELECT 1 FROM wayback_price_evidence WHERE product_id = ?"
+            " AND IFNULL(listing_id, -1) = IFNULL(?, -1) AND snapshot_url = ?"
+            " AND captured_at = ? AND advertised_price = ?",
+            (pid, lid, clean["snapshot_url"], clean["captured_at"],
+             clean["advertised_price"]),
+        ).fetchone()
+        if duplicate:
+            continue
+        conn.execute(
+            "INSERT INTO wayback_price_evidence"
+            " (check_id, product_id, listing_id, original_url, snapshot_url, captured_at,"
+            " matched_model, advertised_price, currency, price_context)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (check_id, pid, lid, original_url, clean["snapshot_url"], clean["captured_at"],
+             clean["model"], clean["advertised_price"], clean["currency"], clean["price_context"]),
+        )
+
+    for old_id, new_id in wayback_check_ids.items():
+        check = wayback_checks_by_id.get(old_id)
+        if check and check.get("status") == "evidence":
+            found = conn.execute(
+                "SELECT 1 FROM wayback_price_evidence WHERE check_id = ? LIMIT 1", (new_id,)
+            ).fetchone()
+            if not found:
+                conn.execute(
+                    "UPDATE wayback_checks SET status = 'no_usable_price', note = ? WHERE id = ?",
+                    ("Imported snapshot contained no safely validated archive evidence.", new_id),
+                )
 
     return report
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import load_config
+from ..urls import resolve_public_http_url
 
 try:  # pragma: no cover - exercised implicitly by the live watcher
     import requests
@@ -311,27 +312,41 @@ class RetailerAdapter:
             raise FetchError("requests is not installed")
         if not self.config.scraping_enabled:
             raise FetchError("scraping disabled by configuration")
-        time.sleep(max(self.config.request_delay, 0))
-        try:
-            response = requests.get(
-                url,
-                timeout=self.config.request_timeout,
-                headers={
-                    "User-Agent": self.config.user_agent,
-                    "Accept-Language": "en-AU,en;q=0.9",
-                },
-            )
-        except Exception as exc:  # network errors of every flavour
-            raise FetchError(f"{type(exc).__name__}: {exc}") from exc
-        if response.status_code == 403:
-            raise FetchError("403: retailer blocked the request (bot protection)")
-        if response.status_code != 200:
-            raise FetchError(f"HTTP {response.status_code}")
-        marker = detect_block(response.text)
-        if marker:
-            # A 200 carrying a challenge page is a block, not an empty product page.
-            raise FetchError(f"bot-protection interstitial (matched {marker!r})")
-        return response.text
+        current_url = url
+        for redirects in range(6):
+            if not resolve_public_http_url(current_url):
+                raise FetchError("unsafe URL or redirect target")
+            time.sleep(max(self.config.request_delay, 0))
+            try:
+                response = requests.get(
+                    current_url,
+                    timeout=self.config.request_timeout,
+                    allow_redirects=False,
+                    headers={
+                        "User-Agent": self.config.user_agent,
+                        "Accept-Language": "en-AU,en;q=0.9",
+                    },
+                )
+            except Exception as exc:  # network errors of every flavour
+                raise FetchError(f"{type(exc).__name__}: {exc}") from exc
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location or redirects == 5:
+                    raise FetchError("too many or invalid redirects")
+                from urllib.parse import urljoin
+                current_url = urljoin(current_url, location)
+                if not resolve_public_http_url(current_url):
+                    raise FetchError("unsafe URL or redirect target")
+                continue
+            if response.status_code == 403:
+                raise FetchError("403: retailer blocked the request (bot protection)")
+            if response.status_code != 200:
+                raise FetchError(f"HTTP {response.status_code}")
+            marker = detect_block(response.text)
+            if marker:
+                raise FetchError(f"bot-protection interstitial (matched {marker!r})")
+            return response.text
+        raise FetchError("too many redirects")
 
     def parse(self, html: str, expected_model: str | None = None) -> Observation:
         return observation_from_json_ld(html, expected_model)

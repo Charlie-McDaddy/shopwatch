@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from datetime import date, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 from app import provenance, store
 from app.db import connect
@@ -816,6 +820,64 @@ def test_create_llm_job_rejects_a_non_string_query_instead_of_crashing(client):
     assert response.status_code == 400
 
 
+def test_gui_model_research_runs_on_host_and_returns_a_sourced_candidate(client, monkeypatch):
+    created = client.post("/api/llm-jobs", json={"query": "robot mower"})
+    assert created.status_code == 202
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+
+    path = Path(__file__).resolve().parents[1] / "deploy" / "research-runner.py"
+    spec = importlib.util.spec_from_file_location("api_research_runner", path)
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = runner
+    spec.loader.exec_module(runner)
+
+    base_url = "http://shopwatch.test"
+    requested = []
+
+    class HttpResponse:
+        def __init__(self, response):
+            self.response = response
+
+        def json(self):
+            return self.response.json()
+
+        def raise_for_status(self):
+            if self.response.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.response.status_code}")
+
+    def api_post(url, **kwargs):
+        requested.append((url, kwargs))
+        return HttpResponse(client.post(url.removeprefix(base_url), json=kwargs.get("json")))
+
+    monkeypatch.setattr(runner.requests, "post", api_post)
+
+    def claude(args, **kwargs):
+        assert args[args.index("--allowedTools") + 1] == "WebSearch"
+        assert "WebSearch" in kwargs["input"]
+        assert kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-token"
+        assert "ANTHROPIC_API_KEY" not in kwargs["env"]
+        assert kwargs["cwd"] == kwargs["env"]["CLAUDE_CONFIG_DIR"]
+        settings_arg = args[args.index("--settings") + 1]
+        assert '"ANTHROPIC_API_KEY": ""' in settings_arg
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"candidates":[{"model":"RM-1","label":"Mower","source":"https://shop.example/rm-1"}],"note":null}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", claude)
+    assert runner.poll_llm_once(base_url, "claude") is True
+
+    result = client.get(f"/api/llm-jobs/{created.json()['id']}").json()
+    assert result["status"] == "DONE"
+    assert json.loads(result["result"])["candidates"] == [
+        {"model": "RM-1", "label": "Mower", "source": "https://shop.example/rm-1"}
+    ]
+    assert requested[0][0].endswith("/api/llm-jobs/claim")
+    assert requested[1][0].endswith(f"/api/llm-jobs/{created.json()['id']}/complete")
+
+
 def test_create_retailer_search_job_rejects_a_non_string_query_instead_of_crashing(client):
     response = client.post("/api/retailer-search-jobs", json={"query": 12345})
     assert response.status_code == 400
@@ -1148,3 +1210,277 @@ def test_notes_html_handles_empty_input():
     assert str(_notes_html(None)) == ""
     assert str(_notes_html("")) == ""
     assert str(_notes_html("   \n  ")) == ""
+
+
+def test_pause_resume_and_restore_keep_the_same_product_and_history(client):
+    product = client.post("/api/products", json={"name": "Widget", "model": "W-1"}).json()
+    pid = product["id"]
+    client.post("/api/products", json={"name": "Elsewhere", "model": "W-2"})
+    listing = client.post(
+        f"/api/products/{pid}/retailers", json={"retailer": "Crowdshop", "advertised_price": 100}
+    ).json()
+    client.post(f"/api/products/{pid}/purchase", json={"price_paid": 100, "listing_id": listing["id"]})
+    history_before = client.get(f"/api/price-history/{pid}").json()
+
+    assert client.patch(f"/api/products/{pid}", json={"status": "PARKED"}).json()["status"] == "PARKED"
+    assert client.post("/api/research-jobs", json={"product_id": pid, "retailer_ids": [listing["retailer_id"]]}).status_code == 400
+    assert client.delete(f"/api/products/{pid}").status_code == 200
+    assert client.get(f"/products/{pid}").status_code == 200
+    assert client.get("/?status=ARCHIVED").status_code == 200
+    archived_page = client.get("/?status=ARCHIVED").text
+    assert "Widget" in archived_page and "Restore" in archived_page
+    assert "Elsewhere" not in archived_page
+    assert "Elsewhere" in client.get("/?status=ALL").text
+
+    restored = client.patch(f"/api/products/{pid}", json={"archived": 0}).json()
+    assert restored["id"] == pid
+    assert restored["listings"][0]["id"] == listing["id"]
+    assert client.get(f"/api/price-history/{pid}").json() == history_before
+    purchases = client.get("/api/purchases").json()
+    assert any(row["product_id"] == pid for row in purchases)
+    assert client.patch(f"/api/products/{pid}", json={"status": "ACTIVE"}).json()["status"] == "ACTIVE"
+
+
+def test_household_location_preferences_default_and_persist(client):
+    initial = client.get("/api/household-settings").json()
+    assert initial == {"postcode": None, "pickup_radius_km": 25}
+
+    saved = client.patch(
+        "/api/household-settings", json={"postcode": "4000", "pickup_radius_km": 40}
+    )
+    assert saved.status_code == 200
+    assert saved.json() == {"postcode": "4000", "pickup_radius_km": 40}
+    assert client.get("/api/household-settings").json() == saved.json()
+
+
+def test_household_location_preferences_reject_invalid_values(client):
+    for body in (
+        {"postcode": "400"}, {"postcode": "ABCD"}, {"postcode": 4000},
+        {"pickup_radius_km": 0}, {"pickup_radius_km": 501}, {"pickup_radius_km": 2.5},
+    ):
+        assert client.patch("/api/household-settings", json=body).status_code == 400
+
+
+def test_household_location_form_and_local_options_are_honest(client):
+    assert client.get("/settings").status_code == 200
+    product = client.post("/api/products", json={"name": "Widget", "model": "W-LOCAL-1"}).json()
+    listing = client.post(
+        f"/api/products/{product['id']}/retailers",
+        json={"retailer": "Local Shop", "advertised_price": 100},
+    ).json()
+    saved_listing = client.patch(
+        f"/api/retailers/{listing['id']}",
+        json={"pickup_status": "Available", "pickup_location": "Brisbane CBD"},
+    ).json()["listing"]
+    assert saved_listing["pickup_status"] == "Available"
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+
+    without_postcode = client.get(f"/products/{product['id']}").text
+    assert "Pickup: Available (manual; location not verified)" in without_postcode
+    assert "cost unknown." in without_postcode
+    assert "No postcode configured" in without_postcode
+
+    client.patch("/api/household-settings", json={"postcode": "4000"})
+    settings = client.get("/settings").text
+    assert 'value="4000"' in settings and 'value="25"' in settings
+    body = client.get(f"/products/{product['id']}").text
+    assert "Delivery to postcode 4000" in body
+    assert "freight is unknown" in body
+    assert "not confirmed for postcode 4000" in body
+    assert "Current pickup availability and cost unknown" in body
+    assert "within 25 km" in body
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before
+
+
+def test_purchase_in_a_group_keeps_its_candidates_visible_and_sibling_active(client):
+    a = client.post("/api/products", json={"name": "Candidate A", "model": "GROUP-A"}).json()
+    b = client.post("/api/products", json={"name": "Candidate B", "model": "GROUP-B"}).json()
+    group = client.post(f"/api/products/{a['id']}/group", json={"name": "GPU options"}).json()
+    group_id = group["group_id"]
+    client.post(f"/api/products/{b['id']}/group", json={"group_id": group_id})
+
+    response = client.post(f"/api/products/{a['id']}/purchase", json={"price_paid": 899})
+    assert response.status_code == 201
+
+    sibling = client.get(f"/api/products/{b['id']}").json()
+    assert sibling["status"] == "ACTIVE" and sibling["archived"] == 0
+    page = client.get(f"/groups/{group_id}").text
+    assert "Candidate A" in page and "Candidate B" in page
+    assert "GPU options" in client.get("/").text
+    assert "2 candidates" in client.get("/").text
+
+
+def test_wayback_history_is_saved_and_rendered_without_changing_confirmed_lows(client, monkeypatch):
+    from app import urls, wayback
+
+    product = client.get("/api/products").json()[0]
+    listing = product["listings"][0]
+    original_url = "https://retailer.example/product/model"
+    # Existing seed URL may be present; give this test one exact reference.
+    updated = client.patch(f"/api/retailers/{listing['id']}", json={"url": original_url})
+    assert updated.status_code == 200
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+
+    monkeypatch.setattr(
+        urls.socket, "getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", ("8.8.8.8", port or 443))],
+    )
+    requests_seen = []
+
+    class ArchiveResponse:
+        def __init__(self, body):
+            self.body = body
+            self.status_code = 200
+            self.headers = {"Content-Length": str(len(body))}
+
+        def iter_content(self, chunk_size):
+            yield self.body
+
+        def close(self):
+            pass
+
+    def archive_get(url, **kwargs):
+        requests_seen.append((url, kwargs))
+        if url == wayback.CDX_URL:
+            body = json.dumps(
+                [
+                    ["timestamp", "original", "statuscode", "mimetype"],
+                    ["20230101000000", kwargs["params"]["url"], "200", "text/html"],
+                ]
+            ).encode()
+        else:
+            product_data = {
+                "@type": "Product",
+                "model": product["model"],
+                "offers": {"price": "899.00", "priceCurrency": "AUD"},
+            }
+            body = (
+                "<html><script type='application/ld+json'>"
+                + json.dumps(product_data)
+                + "</script></html>"
+            ).encode()
+        return ArchiveResponse(body)
+
+    monkeypatch.setattr(wayback.requests, "get", archive_get)
+    response = client.post(f"/api/products/{product['id']}/wayback-history")
+    assert response.status_code == 200
+    assert response.json()["evidence_count"] == 1
+    assert len(requests_seen) == 2
+    assert all(call[1]["allow_redirects"] is False for call in requests_seen)
+
+    page = client.get(f"/products/{product['id']}")
+    assert page.status_code == 200
+    assert "Wayback price history" in page.text
+    assert "Archived advertised price" in page.text
+    assert "2023-01-01" in page.text
+    assert "https://web.archive.org/web/20230101000000id_" in page.text
+    assert "freight and discount eligibility unknown" in page.text
+
+    after = client.get(f"/api/products/{product['id']}").json()
+    assert after["lowest_known_price"] == product["lowest_known_price"]
+    history = client.get(f"/api/price-history/{product['id']}").json()
+    assert history == history_before
+
+
+def test_wayback_no_snapshot_shows_gap_and_keeps_product_watchable(client, monkeypatch):
+    from app import urls, wayback
+
+    product = client.get("/api/products").json()[0]
+    listing = product["listings"][0]
+    assert (
+        client.patch(
+            f"/api/retailers/{listing['id']}", json={"url": "https://retailer.example/item"}
+        ).status_code
+        == 200
+    )
+    monkeypatch.setattr(
+        urls.socket, "getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", ("8.8.8.8", port or 443))],
+    )
+
+    class EmptyArchiveResponse:
+        status_code = 200
+        headers = {"Content-Length": "51"}
+
+        def iter_content(self, chunk_size):
+            yield b'[["timestamp","original","statuscode","mimetype"]]'
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wayback.requests, "get", lambda *a, **k: EmptyArchiveResponse())
+    history_before = client.get(f"/api/price-history/{product['id']}").json()
+    response = client.post(f"/api/products/{product['id']}/wayback-history")
+    assert response.status_code == 200
+    assert response.json()["evidence_count"] == 0
+
+    page = client.get(f"/products/{product['id']}")
+    assert "Wayback has no matching public page snapshots." in page.text
+    assert "Check prices now" in page.text
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before
+
+
+def test_postcode_change_requires_current_freight_confirmation(client):
+    client.patch("/api/household-settings", json={"postcode": "4000"})
+    product = q930h(client)
+    listing = next(row for row in product["listings"] if row["retailer_name"] == "Crowdshop")
+    listing_id = listing["id"]
+
+    confirmed = client.patch(f"/api/retailers/{listing_id}", json={"freight": 25, "pickup_status": "Available", "pickup_location": "Brisbane CBD"}).json()["listing"]
+    assert confirmed["delivered_resolved"] is True
+    assert confirmed["pickup_current"] is True
+    first_alerts = client.post("/api/alerts/evaluate").json()["alerts"]
+    assert any(alert["listing_id"] == listing_id for alert in first_alerts)
+    history_before_move = client.get(f"/api/price-history/{product['id']}").json()
+    known_low_before_stale_observation = client.get(
+        f"/api/products/{product['id']}"
+    ).json()["lowest_known_price"]
+    assert history_before_move[0]["freight_resolved"] == 1
+
+    client.patch("/api/household-settings", json={"postcode": "5000"})
+    stale = client.get(f"/api/retailers/{listing_id}").json()
+    assert stale["freight"] == 25.0  # retain the old quote and manual override
+    assert stale["delivered_price"] == stale["advertised_price"]  # excludes old freight
+    assert stale["delivered_resolved"] is False
+    assert stale["verification"]["freight"]["status"] == "STALE"
+    assert stale["pickup_status"] == "Available" and stale["pickup_location"] == "Brisbane CBD"
+    assert stale["pickup_current"] is False
+    assert "not confirmed for postcode 5000" in client.get(f"/products/{product['id']}").text
+    assert "Previous quote for postcode 4000" in client.get(f"/products/{product['id']}").text
+    assert client.get(f"/api/price-history/{product['id']}").json() == history_before_move
+    assert client.post("/api/alerts/evaluate").json()["alerts"] == []
+
+    client.patch(f"/api/retailers/{listing_id}", json={"advertised_price": 800})
+    stale_history = client.get(f"/api/price-history/{product['id']}").json()
+    assert stale_history[0]["freight"] == 25.0
+    assert stale_history[0]["freight_resolved"] == 0
+    assert client.get(f"/api/products/{product['id']}").json()["lowest_known_price"] == (
+        known_low_before_stale_observation
+    )
+
+    client.patch("/api/household-settings", json={"pickup_radius_km": 50})
+    radius_only = client.get(f"/api/retailers/{listing_id}").json()
+    assert radius_only["delivered_resolved"] is False
+
+    reconfirmed = client.patch(f"/api/retailers/{listing_id}", json={"freight": 25, "pickup_status": "Available", "pickup_location": "Brisbane CBD"}).json()["listing"]
+    assert reconfirmed["delivered_resolved"] is True
+    assert reconfirmed["pickup_current"] is True
+    assert reconfirmed["freight_current"] is True
+    assert reconfirmed["verification"]["freight"]["status"] != "STALE"
+    # A refresh that cannot replace manually locked values must not discard their
+    # postcode confirmation.
+    blocked_refresh = client.patch(
+        f"/api/retailers/{listing_id}",
+        json={"manual": False, "freight": 30, "pickup_status": "Unavailable"},
+    ).json()["listing"]
+    assert blocked_refresh["freight"] == 25.0
+    assert blocked_refresh["pickup_status"] == "Available"
+    assert blocked_refresh["freight_current"] is True
+    assert blocked_refresh["pickup_current"] is True
+    assert client.get(f"/api/price-history/{product['id']}").json()[0]["freight_resolved"] == 1
+    assert client.get(f"/api/products/{product['id']}").json()["lowest_known_price"] == 825
+    current_alerts = client.post("/api/alerts/evaluate").json()["alerts"]
+    assert any(alert["listing_id"] == listing_id for alert in current_alerts)
+
+    client.patch("/api/household-settings", json={"pickup_radius_km": 75})
+    assert client.get(f"/api/retailers/{listing_id}").json()["delivered_resolved"] is True

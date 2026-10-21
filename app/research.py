@@ -123,10 +123,8 @@ def create_job(
     hand is that the runner does not have to guess which page is the right one. A
     retailer id with no entry behaves exactly as before.
 
-    Refuses outright for an archived product - "give up on this" (or a group purchase
-    that archived every other candidate) means stop watching, and a stray research job
-    against something nobody is hunting any more is exactly the wasted spend that
-    guarantee exists to prevent.
+    Refuses outright for a paused or archived product - a stray research job against
+    something nobody is currently watching is exactly the wasted spend this prevents.
 
     At most one active (QUEUED or RUNNING) job per product regardless of kind: the
     host runner processes one job at a time per product anyway, and a price job and a
@@ -134,9 +132,11 @@ def create_job(
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
-    row = conn.execute("SELECT archived FROM products WHERE id = ?", (product_id,)).fetchone()
-    if row is not None and row["archived"]:
-        raise ValueError("cannot start research on an archived product")
+    row = conn.execute(
+        "SELECT archived, status FROM products WHERE id = ?", (product_id,)
+    ).fetchone()
+    if row is not None and (row["archived"] or row["status"] == "PARKED"):
+        raise ValueError("cannot start research on a paused or archived product")
 
     known_ids: list[int] = []
     if kind == "price":
@@ -217,7 +217,9 @@ def claim_next_queued(conn: sqlite3.Connection) -> dict[str, Any] | None:
     this call actually won it.
     """
     row = conn.execute(
-        "SELECT id FROM research_jobs WHERE status = 'QUEUED' ORDER BY id LIMIT 1"
+        "SELECT j.id FROM research_jobs j JOIN products p ON p.id = j.product_id"
+        " WHERE j.status = 'QUEUED' AND p.archived = 0 AND p.status != 'PARKED'"
+        " ORDER BY j.id LIMIT 1"
     ).fetchone()
     if row is None:
         return None

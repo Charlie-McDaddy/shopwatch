@@ -131,7 +131,7 @@
       <span class="retailer-swatch{{ '' if l.delivered_resolved else ' is-open' }}"
             style="--retailer-color: {{ l.retailer_color }}" aria-hidden="true"></span>
       {% endif %}
-      {{ l.retailer_name }}
+      {{ l.retailer_name }}{% if l.seller_name %} <span class="muted">- {{ l.seller_name }}</span>{% elif l.seller_id %} <span class="muted">- seller {{ l.seller_id }}</span>{% endif %}
       {% if l.url|safe_url %}
       {# l.url is free text from three different write paths (typed by hand, pasted
          import, the research runner) and none of them constrain the scheme - safe_url
@@ -150,17 +150,25 @@
         </svg>
       </a>
       {% endif %}
-      <small>{{ l.condition|replace('_',' ')|capitalize }}{% if l.stock_status %} &middot; {{ l.stock_status }}{% endif %}{% if l.price_valid_until %} &middot; <span class="{{ 'promo-lapsed' if l.promo_lapsed else 'promo-ends' }}">{{ 'ended' if l.promo_lapsed else 'ends' }} {{ l.price_valid_until|shortdate }}</span>{% endif %}</small>
+      <small>{{ l.condition|replace('_',' ')|capitalize }}{% if l.stock_status %} &middot; {{ l.stock_status }}{% endif %}{% if l.price_valid_until %} &middot; <span class="{{ 'promo-lapsed' if l.promo_lapsed else 'promo-ends' }}">{{ 'ended' if l.promo_lapsed else 'ends' }} {{ l.price_valid_until|shortdate }}</span>{% endif %}
+        &middot; <span title="{{ l.check_error or '' }}">{% if l.check_status == 'BLOCKED' %}Automatic check blocked{% elif l.check_status == 'STALE' %}Price data stale{% elif l.check_capability == 'AUTOMATIC' %}Automatic checks{% else %}Manual updates{% endif %}</span></small>
+      <small class="fulfilment">
+        {% if not l.pickup_current and (l.pickup_status or l.pickup_location) %}Previous pickup information{% if l.pickup_status %}: {{ l.pickup_status }}{% endif %}{% if l.pickup_location %} at {{ l.pickup_location }}{% endif %} (postcode {{ l.pickup_postcode or 'unknown' }}); not confirmed for postcode {{ household_settings.postcode or 'unset' }}. Current pickup availability and cost unknown.
+        {% elif l.pickup_status %}Pickup: {{ l.pickup_status }} ({{ l.provenance.pickup_status.state|lower|replace('_', ' ') }}; location not verified){% if l.pickup_location %} at {{ l.pickup_location }}{% endif %}; cost unknown.
+        {% else %}Pickup availability and cost unknown.{% endif %}
+        {% if household_settings.postcode %}Check stores within {{ household_settings.pickup_radius_km }} km of postcode {{ household_settings.postcode }}; distance and stock are not verified.
+        {% else %}No postcode configured; local availability is unknown.{% endif %}
+      </small>
     </span>
     <span class="price" data-cell="delivered">
       {%- if l.delivered_price is none %}<span class="unresolved">no price</span>
       {%- else %}{{ l.delivered_price|money }}
-        <small>{% if l.delivered_resolved %}delivered{% else %}before freight{% endif %}</small>
+        <small>{% if l.delivered_resolved %}AUD delivery total on file{% else %}before freight; total unresolved{% endif %}</small>
       {%- endif %}
+      <small>{% if household_settings.postcode %}Delivery to postcode {{ household_settings.postcode }}: {% if l.delivered_resolved %}freight confirmed{% else %}freight is unknown{% endif %}{% else %}Delivery postcode not set; {% if l.delivered_resolved %}freight on file{% else %}freight is unknown{% endif %}{% endif %}{% if not l.freight_current and l.freight is not none %} Previous quote for postcode {{ l.freight_postcode or 'unknown area' }} retained; reconfirm freight for this postcode.{% endif %}</small>
     </span>
     <span class="note">
-      {%- if l.pickup_status %}{{ l.pickup_status }}
-      {%- elif l.coupon_discount %}{{ l.coupon_discount|money }} code applied
+      {%- if l.coupon_discount %}{{ l.coupon_discount|money }} code applied
       {%- elif l.diff_from_low is not none and l.diff_from_low > 0 %}{{ l.diff_from_low|money }} above the low
       {%- endif %}
     </span>
@@ -314,6 +322,9 @@
   </div>
 
   <p class="verdict {{ product.tone }}">{{ product.verdict_line }}</p>
+  {% if product.quantity and product.quantity_unit %}
+  <p class="small muted" style="margin:0 20px 8px">Pack: {{ product.quantity }} {{ product.quantity_unit }}{% if product.best_unit_price %} &middot; {% if product.best_resolved %}Best{% else %}Estimate{% endif %}: {{ product.best_unit_price[0]|money }} per {{ product.best_unit_price[1] }}{% if not product.best_resolved %} (freight unresolved){% endif %}{% endif %}</p>
+  {% endif %}
 
   {% if product.offers %}
     {% for o in product.offers %}

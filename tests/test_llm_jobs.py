@@ -1,9 +1,8 @@
 """LLM helper job state machine: claim/complete race-safety and staleness recovery.
 
 Pure unit tests against sqlite - no subprocess, no `claude`/`codex` CLI, nothing that
-spends real quota. tools/llm-helper.py (the thing that actually claims and answers a
-job) is a separate process this suite never touches - see app/llm_jobs.py's own module
-docstring.
+spends real quota. The host runner is a separate process this suite never touches -
+see app/llm_jobs.py's own module docstring.
 """
 
 from __future__ import annotations

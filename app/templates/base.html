@@ -18,7 +18,8 @@
     <button id="btn-import" class="has-icon">
       <span class="icon" aria-hidden="true">{% include "_icons/clipboard.svg" %}</span>Paste in research
     </button>
-    <button id="btn-llm-setup">Set up your LLM</button>
+    <button id="btn-llm-setup">Research access</button>
+    <a class="btn" href="/settings">Local area</a>
     <a class="btn" href="/retailers">Retailers</a>
     <details class="menu" style="position:relative">
       <summary class="btn has-icon" style="list-style:none">
@@ -82,50 +83,19 @@
 </dialog>
 
 <dialog id="llm-setup-dialog">
-  <header>Set up your LLM</header>
+  <header>Research access</header>
   <div class="body">
     <p class="small muted" style="margin:0 0 12px;max-width:60ch">
-      The wizard's "Suggest models" button needs a small helper running somewhere on
-      this network that already has <strong>Claude Code</strong> or
-      <strong>OpenAI's Codex CLI</strong> installed and signed in - yours, or anyone
-      else's. It costs nothing beyond what you already pay for that CLI: no API key,
-      nothing this server stores, holds, or bills for.
-    </p>
-    <p style="margin:0 0 8px">
-      <a id="llm-setup-zip-link" href="/tools/llm-helper.zip" download class="btn primary">
-        Download the helper
-      </a>
+      Product suggestions and retailer research run on the Shopwatch host through its
+      <strong>Claude Code</strong> CLI session and web search. Shopwatch does not use an
+      API key or paid OpenRouter fallback, and does not expose the session to this app.
     </p>
     <p class="small muted" style="margin:0 0 16px;max-width:60ch">
-      Unzip it, then double-click the file matching your computer and AI tool -
-      Windows, Mac or Linux, Claude Code or Codex. It'll ask for your shopwatch
-      username and password (the same ones you use to open this site), then leave
-      that window open while you use the wizard's "Suggest models" button. Full
-      instructions are in the README inside the zip.
+      The host operator must keep the CLI signed in and verify its subscription and
+      WebSearch access. If a job asks for reconnection, sign Claude Code in again on
+      the host and retry it from the wizard. Direct retailer checks continue while
+      research is unavailable.
     </p>
-
-    <details>
-      <summary class="small muted" style="cursor:pointer">Prefer the command line?</summary>
-      <ol style="margin:10px 0 0;padding-left:20px;max-width:60ch">
-        <li style="margin-bottom:8px">
-          <a href="/tools/llm-helper.py" download>Download llm-helper.py</a>
-          onto that machine (it needs nothing else installed - no pip, no venv).
-        </li>
-        <li style="margin-bottom:8px">
-          Open a terminal there and run:
-          <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
-            <code id="llm-setup-command" class="num"
-                  style="flex:1;padding:8px 10px;background:var(--paper);border:1px solid var(--rule);
-                         border-radius:var(--radius-control);overflow-x:auto;white-space:nowrap"></code>
-            <button type="button" id="llm-setup-copy" class="btn">Copy</button>
-          </div>
-          <small class="muted">Using Codex instead? Add <code>--backend codex</code>.</small>
-        </li>
-        <li>Enter your shopwatch username and password when prompted. Leave it
-          running in that terminal; it answers requests as they arrive and does
-          nothing the rest of the time.</li>
-      </ol>
-    </details>
   </div>
   <footer>
     <button data-close>Close</button>

@@ -5,7 +5,7 @@
 
 # Shopwatch
 
-[![CI](https://github.com/rodlunt/shopwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/rodlunt/shopwatch/actions/workflows/ci.yml)
+[![CI](https://github.com/Charlie-McDaddy/shopwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Charlie-McDaddy/shopwatch/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12-informational)
 ![Version](https://img.shields.io/badge/version-0.2.0-informational)
@@ -156,7 +156,7 @@ something is still watching for a lot cheaper.
 | | |
 |---|---|
 | Live | https://shop.yourdomain.example (LAN only, `basic_auth`) |
-| Code | GitHub `rodlunt/shopwatch` (private) |
+| Code | GitHub `Charlie-McDaddy/shopwatch` |
 | Deploy | merge to `main`; a green CI run deploys, see **Deployed on opti** |
 | Secrets | `SECURITY.md` names every lane |
 | Tests | `.venv/bin/python -m pytest` and `.venv/bin/python -m ruff check .` |
@@ -185,13 +185,13 @@ app/
   alerts.py          rule evaluation, ntfy / webhook / console delivery
   seed.py            category profiles, retailers, HW-Q930H/XY board
   research.py        the wizard's research-job lifecycle (deploy/research-runner.py claims)
-  llm_jobs.py         the wizard's model-suggestion job lifecycle (tools/llm-helper.py claims)
+  llm_jobs.py         the wizard's model-suggestion jobs (host research runner claims)
   retailers/
     base.py          adapter framework, JSON-LD reader, Observation
     crowdshop.py  harvey_norman.py  jb_hifi.py  the_good_guys.py  appliance_central.py
   templates/  static/
 tools/
-  llm-helper.py      run on YOUR OWN machine - see "Suggesting a model number" below
+  llm-helper.py      shared research prompts/parsers; optional standalone CLI helper
   llm-helper-bundle/ README.txt + double-click launchers zipped by GET /tools/llm-helper.zip
 deploy/
   research-runner.py opti-only host script - see "The product wizard's research step"
@@ -542,6 +542,14 @@ container never holds the Claude Code OAuth token and never gains new outbound e
 only the host script does, reusing the same `/srv/prod/career/runner.env` credential
 mailwatch already reuses. Nothing new to store or rotate.
 
+The GUI uses the host's existing Claude Code CLI session; it does not use an Anthropic
+API key or paid OpenRouter fallback. A Claude subscription alone does not prove that
+this host's CLI session is authorised for unattended use or web search. Before relying
+on research, the host operator must verify the signed-in CLI and its WebSearch access
+on that host. If access expires, the job reports that the host session needs reconnecting
+and can be retried after the operator signs the CLI in again. Direct retailer checks
+continue independently of this research queue.
+
 **At most one active job per product.** A database constraint (not just application
 logic) rejects a second `QUEUED` or `RUNNING` job for a product with a 409, so a
 double-click or a retried request can't spend the shared research quota twice. A
@@ -688,84 +696,48 @@ via `DELETE /api/retailers/{listing_id}`) - "reactivate by hand" means adding th
 through the ordinary "Add retailer manually" or "Add from a URL" flow, which creates a fresh
 listing.
 
-## Suggesting a model number ("Set up your LLM")
+## Wayback price evidence
 
-**TL;DR - 5 minutes, no coding:**
+A product page's **Check archived listings** action searches the Internet Archive CDX
+index for the exact public URLs already attached to that product. It checks a bounded
+number of recent captures per listing (at most eight listing URLs, 16 archive requests,
+and 30 seconds per check); any URLs beyond that limit are shown as a coverage gap. It
+only saves a price when the archived page
+contains the exact model plus an explicit AUD price in structured product data or
+OpenGraph metadata. The row links to its archived snapshot and shows the capture date,
+matched model/variant, and price context. Unknown freight and discount eligibility stay
+unknown; this evidence never changes confirmed delivered-price history or the recorded
+historical low.
 
-1. Click **"Set up your LLM"** at the top of the page, then **"Download the helper"**.
-2. Unzip it.
-3. Double-click the one file matching your computer and AI tool (a plain-English
-   `README.txt` is in the zip too if you're not sure which):
+Missing, blocked, malformed, wrong-model, or non-AUD captures appear as coverage gaps
+and do not affect price watching. The [Internet Archive CDX documentation](https://github.com/internetarchive/wayback/blob/master/wayback-cdx-server/README.md)
+describes exact-URL queries and bounded result limits. Archive availability and capture
+coverage are not guaranteed, and this is not an all-time price record.
 
-   |            | Claude Code               | Codex                     |
-   |------------|----------------------------|----------------------------|
-   | Windows    | `run-claude-windows.bat`   | `run-codex-windows.bat`   |
-   | Mac        | `run-claude-mac.command`   | `run-codex-mac.command`   |
-   | Linux      | `run-claude-linux.sh`      | `run-codex-linux.sh`      |
+## Product and retailer research
 
-4. A window opens and asks for your shopwatch username and password (the same ones
-   you already use to open this site). Enter them and leave that window open.
+Model suggestions, retailer discovery and price research all start in the GUI and run
+through the host research runner. Model suggestions and retailer discovery use the
+host's existing Claude Code CLI session with WebSearch; retailer discovery can also use
+the self-hosted Firecrawl service. Retailer price research uses WebSearch/WebFetch. The
+app does not call a paid AI/search API or fall back to paid OpenRouter credits.
 
-That's it. Back in the wizard, type what you're watching and click "Suggest models" -
-candidates appear as clickable chips a few seconds later. You'll need Claude Code or
-Codex already installed and signed in on that computer, but nothing else: no API key,
-no `pip install`, nothing this server stores or bills for.
+For Claude jobs, the runner requires `CLAUDE_CODE_OAUTH_TOKEN`, clears API-key and
+cloud-provider routing variables, and starts Claude Code with an isolated configuration
+and those billing overrides disabled. It fails the job when the subscription token is
+missing instead of falling back to API credentials.
 
-<details>
-<summary>How it works, the command-line option, and why it's built this way</summary>
+Before relying on unattended research, verify that `CLAUDE_CODE_OAUTH_TOKEN` is
+configured in the host runner environment without printing its value, then submit one
+GUI search and confirm that it completes with source links. The token's presence alone
+does not prove that it remains valid or that the account permits unattended WebSearch.
 
-The wizard's "Suggest models" button turns a rough description ("Dreame RoboMower")
-into a short list of real candidate model numbers, using **your own** Claude Code or
-Codex CLI login - no API key, nothing this server holds or bills for.
-
-**The zip** (`GET /tools/llm-helper.zip`) contains `llm-helper.py`, a plain-English
-`README.txt`, and a double-click launcher per OS x backend combination, each already
-pointed at this shopwatch instance - no command to type or edit.
-
-**Setup, from the command line**, if you'd rather:
-
-1. Download `tools/llm-helper.py` (the running app serves it directly at
-   `/tools/llm-helper.py`, or grab it from this repo).
-2. Run it:
-   ```
-   python3 llm-helper.py --url https://your-shopwatch-url --backend claude
-   ```
-   (`--backend codex` for Codex.) No `pip install` needed - the script is pure standard
-   library. Enter your shopwatch username and password when prompted.
-3. Leave it running. Back in the wizard, type what you're watching and click "Suggest
-   models" - it queues a job, the helper picks it up within a couple of seconds, and
-   candidates appear as clickable chips that fill "Exact model" for you to verify.
-
-**Why this shape, not a container-side API key:** every other credentialed feature in
-this app (mailwatch, the research runner above) deliberately keeps the credential off
-the web container entirely - a compromised container has nothing worth stealing. This
-extends that same principle one step further: the credential does not even belong to
-*this* server. It belongs to whoever's machine is running the helper, using whatever CLI
-subscription they already pay for. Nothing to configure server-side, nothing to rotate.
-
-**Same job-queue shape as the research runner above** (`app/llm_jobs.py` mirrors
-`app/research.py` closely): `POST /api/llm-jobs` queues a job and returns immediately,
-`POST /api/llm-jobs/claim` is how a helper claims the next one, `POST
-/api/llm-jobs/{id}/complete` reports the answer back, and a job stuck `RUNNING` for
-longer than two minutes (`llm_jobs.JOB_CEILING_SECONDS`) is judged stale and failed
-automatically - a killed terminal must not leave the wizard waiting forever.
-
-**A candidate is a suggestion to verify, never applied automatically.** "Exact model" is
-used to match future price imports, so a wrong-but-plausible model number would silently
-corrupt matching later. The prompt asks the model to return zero candidates rather than
-guess when it isn't genuinely confident, and every response is shown with a caveat note
-about confidence or recency - clicking a chip only fills the text field, exactly as if
-you had typed it yourself.
-
-**The URL that goes into the zip is validated, not trusted.** `GET
-/tools/llm-helper.zip?url=...` writes that value as plain data into the zip
-(`shopwatch-url.txt`, which each launcher reads at runtime) rather than ever splicing
-it into a script's own text, and rejects anything that isn't exactly `https?://host
-[:port]` before it gets that far - a download link is something someone could be
-tricked into clicking, so the value behind `url` gets no more trust than any other
-request parameter.
-
-</details>
+The web container never receives the CLI credential. A subscription alone does not
+prove that the host session has unattended access or WebSearch enabled, so the host
+operator must verify that access before relying on research. A failed or expired session
+appears as a failed job with a reconnect-and-retry instruction; independent direct
+retailer checks continue. Model candidates include source links and remain suggestions:
+clicking one only fills the model field for the user to verify.
 
 ## Deployed on opti
 
@@ -887,9 +859,28 @@ ssh root@YOUR-SERVER-IP 'docker compose -f /srv/prod/shopwatch/docker-compose.ym
 
 ## Running without Docker
 
+From the repo root, use Python 3.12 to create an isolated environment and install
+the runtime and development requirements (including pytest and Ruff):
+
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements-dev.txt
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+On Debian or Ubuntu, if environment creation reports that `ensurepip` is unavailable,
+install venv support, then repeat the commands above:
+
+```bash
+sudo apt install python3.12-venv
+```
+
+If you already use `uv`, the equivalent setup is `uv venv --python 3.12 .venv`
+followed by `uv pip install --python .venv/bin/python -r requirements-dev.txt`.
+Activation is optional: the commands here use the environment's Python directly.
+
+Seed the database and start the app:
+
+```bash
 .venv/bin/python -m app.seed
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8477
 ```
@@ -1009,6 +1000,7 @@ what would fire without sending anything.
 | `PATCH` | `/api/products/{id}` | targets, specs, dimensions, verdict |
 | `DELETE` | `/api/products/{id}` | archives, never deletes |
 | `GET` | `/api/products/{id}/retailers` | the listings |
+| `POST` | `/api/products/{id}/wayback-history` | bounded check of existing public listing URLs; persists sourced archive evidence and coverage gaps |
 | `POST` | `/api/products/{id}/retailers` | add a listing |
 | `POST` | `/api/products/{id}/retailers/from-url` | `{"url": "..."}`; derives the retailer, always saves the URL, scrapes or queues research |
 | `GET` | `/api/products/check-model?model=...` | deterministic duplicate check for the wizard |
@@ -1091,8 +1083,8 @@ instead and it still records cleanly.
 
 Recording a purchase:
 
-* moves the product to `PURCHASED`, which **stops its alerts** and takes it out of the
-  watch, so a bought item does not keep telling you its price is good;
+* moves the product to `PURCHASED` while keeping its card watched, so repeat-purchase
+  products can still alert on future specials;
 * writes a `price_history` row with source `purchase` and `freight_resolved = 1`, because
   a price someone actually paid is the most trustworthy observation there is;
 * keeps everything else. `DELETE /api/products/{id}/purchase` undoes the record and returns
@@ -1102,11 +1094,13 @@ Recording a purchase:
 ### Price protection
 
 `price_protection_until` (a `YYYY-MM-DD` date) is optional and off by default. Set it and
-the watch keeps running on that product and raises a **Price protection** alert if a
+the watch can also raise a **Price protection** alert if a
 *confirmed* delivered price drops below what you paid, which is what you need to claim
 against a retailer's price guarantee. Unconfirmed prices are ignored: sending someone to a
 checkout to discover it was never actually cheaper is worse than saying nothing. Leave the
-field empty and buying simply stops the watch.
+field empty and the ordinary watch continues. Pause the card to suspend checks and
+alerts, or use **Remove** to archive it and retain its history. **Restore** is available
+from the Archived board view.
 
 ## Importing external research
 
@@ -1196,9 +1190,12 @@ or add an entry to `CATEGORY_PROFILES` in `app/seed.py` and re-run `python -m ap
 
 ## Tests
 
+Install the development requirements using the setup above, then run:
+
 ```bash
-.venv/bin/python -m pytest        # 144 tests
+.venv/bin/python -m pytest
 .venv/bin/python -m ruff check .
+.venv/bin/python -m pip check
 ```
 
 They cover the behaviour that is easy to break quietly: delivered-price arithmetic,

@@ -11,13 +11,22 @@
   <button id="btn-edit-product">Edit</button>
   <button id="btn-add-listing">Add retailer manually</button>
   <button id="btn-add-listing-url">Add from a URL (auto-check price)</button>
-  <button id="btn-watch-product" data-product="{{ product.id }}">Check prices now</button>
-  <button id="btn-research-retailers" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research retailers again</button>
-  <button id="btn-research-historical-low" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research historical low</button>
-  {% if product.status == 'PURCHASED' %}
+  {% if not product.archived and product.status != 'PARKED' %}
+    <button id="btn-watch-product" data-product="{{ product.id }}">Check prices now</button>
+    <button id="btn-research-retailers" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research retailers again</button>
+    <button id="btn-research-historical-low" data-product="{{ product.id }}" data-name="{{ product.name }}" data-model="{{ product.model }}">Research historical low</button>
+  {% endif %}
+{% if product.purchase %}
     <button id="btn-undo-purchase" data-product="{{ product.id }}">Undo purchase</button>
   {% else %}
     <button id="btn-mark-purchased" class="primary">I bought this</button>
+  {% endif %}
+  {% if product.archived %}
+    <button data-restore-product="{{ product.id }}">Restore</button>
+  {% elif product.status == 'PARKED' %}
+    <button data-resume-product="{{ product.id }}" data-resume-status="{{ 'PURCHASED' if product.purchase else 'ACTIVE' }}">Resume watching</button>
+  {% else %}
+    <button data-pause-product="{{ product.id }}">Pause watching</button>
   {% endif %}
   {% if product.group_id %}
     <a class="btn" href="/groups/{{ product.group_id }}">In a group</a>
@@ -60,7 +69,7 @@
   </footer>
 </dialog>
 
-{% if product.purchase %}
+  {% if product.purchase %}
 <div class="panel" style="padding:0;overflow:hidden">
   <div class="bought-strip">
     <span>Bought {{ product.purchase.purchased_at[:10] }}{% if product.purchase.retailer_name %}
@@ -71,7 +80,7 @@
       <span>Price protection {{ 'runs to' if product.protection_open else 'closed' }}
         {{ product.purchase.price_protection_until }}</span>
     {% else %}
-      <span class="muted">No price-protection window, so checking has stopped.</span>
+      <span class="muted">No price-protection window.</span>
     {% endif %}
   </div>
 </div>
@@ -137,6 +146,40 @@
 </div>
 
 <div class="panel">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+    <h3 style="margin:0">Wayback price history</h3>
+    <button id="btn-wayback-history" data-product="{{ product.id }}">Check archived listings</button>
+  </div>
+  <p class="small muted" style="margin:8px 0">Archived advertised prices are historical evidence, not delivered prices.
+    Freight, discount eligibility and complete all-time coverage are unknown.</p>
+  {% if wayback_evidence %}
+  <div class="scroll-x">
+    <table class="plain">
+      <tr><th>Snapshot date</th><th>Retailer</th><th>Matched model / variant</th><th class="r">Advertised (AUD)</th><th>Context</th><th>Source</th></tr>
+      {% for item in wayback_evidence %}
+      <tr>
+        <td class="muted">{{ item.captured_at[:10] }}</td>
+        <td>{{ item.retailer_name or '-' }}</td>
+        <td class="num">{{ item.matched_model }}</td>
+        <td class="r num">{{ item.advertised_price|money }}</td>
+        <td class="small">{{ item.price_context }}</td>
+        <td class="small"><a href="{{ item.snapshot_url }}" target="_blank" rel="noopener noreferrer">Wayback snapshot</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% else %}<p class="muted small" style="margin:8px 0 0">No usable archive prices recorded yet. This does not affect watching.</p>{% endif %}
+  {% if wayback_coverage %}
+  <details class="more" style="margin-top:8px">
+    <summary>Coverage and gaps ({{ wayback_coverage|length }} listing{{ 's' if wayback_coverage|length != 1 }})</summary>
+    {% for check in wayback_coverage %}
+      <p class="small muted" style="margin:6px 0">{{ check.retailer_name or 'Listings' }}: {{ check.note }}</p>
+    {% endfor %}
+  </details>
+  {% endif %}
+</div>
+
+<div class="panel">
   <h3>Price history</h3>
   {% if history %}
   <details class="more" open>
@@ -186,9 +229,9 @@
       <label>Condition <select id="pu-condition">{% for c in conditions %}<option>{{ c }}</option>{% endfor %}</select></label>
       <label>Order number <input id="pu-order"></label>
       <label>Warranty, months <input id="pu-warranty" type="number" step="1"></label>
-      <label>Keep watching until
+      <label>Price protection through
         <input id="pu-protection" type="date">
-        <small>Optional. Tells you if it drops below what you paid, for a price guarantee.</small>
+        <small>Optional. Alert if a confirmed price drops below what you paid.</small>
       </label>
       <label class="wide">Notes <input id="pu-notes"></label>
     </div>
@@ -224,14 +267,16 @@
   <div class="body">
     <p class="small muted" style="margin:0 0 10px;max-width:60ch">
       Found this somewhere and just have the page address? Paste it below. The
-      retailer is worked out from the URL - if it's one shopwatch already knows how to
-      scrape, the price comes back straight away; otherwise a one-off check is queued
-      for it.
+      retailer is worked out from the URL. Supported retailer pages may be checked
+      automatically; marketplace and other unsupported links need manual price updates.
     </p>
     <div class="form-grid">
       <label class="wide">Listing URL
         <input id="ul-url" placeholder="https://www.example.com.au/the-product" autocomplete="off">
       </label>
+      <label>Marketplace seller <input id="ul-seller-name" placeholder="Seller name"></label>
+      <label>Seller ID <input id="ul-seller-id" placeholder="Optional seller ID"></label>
+      <label class="wide">Offer ID <input id="ul-offer-id" placeholder="Optional offer ID"></label>
     </div>
   </div>
   <footer><button data-close>Cancel</button><button class="primary" id="ul-save">Add</button></footer>
@@ -288,6 +333,8 @@
       <label>Brand <input id="ep-brand" value="{{ product.brand or '' }}"></label>
       <label>Category <input id="ep-category" value="{{ product.category }}" list="cat-list"></label>
       <label>Generation <input id="ep-generation" value="{{ product.generation or '' }}"></label>
+      <label>Pack quantity <input id="ep-quantity" type="number" min="0" step="any" value="{{ product.quantity or '' }}"></label>
+      <label>Quantity unit <select id="ep-quantity_unit"><option value="">Unknown</option>{% for unit in ['g', 'kg', 'ml', 'L', 'each'] %}<option value="{{ unit }}" {% if product.quantity_unit == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}</select></label>
       <label>Worth buying? <select id="ep-verdict">{% for v in verdicts %}<option {% if v == product.verdict %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
       <label>State <select id="ep-status">{% for st in statuses %}<option {% if st == product.status %}selected{% endif %}>{{ st }}</option>{% endfor %}</select></label>
       <label>Buy at or under <input id="ep-trigger_price" type="number" step="0.01" value="{{ product.trigger_price or '' }}">

@@ -18,18 +18,22 @@ PRODUCT_FIELDS = [
     "name", "model", "brand", "category", "generation", "verdict", "status", "notes",
     "trigger_price", "excellent_price", "historical_low_price",
     "lowest_known_price", "lowest_known_date", "lowest_known_retailer", "lowest_known_notes",
+    "quantity", "quantity_unit",
     "width_mm", "height_mm", "depth_mm", "weight_kg",
     "packaged_width_mm", "packaged_height_mm", "packaged_depth_mm", "packaged_weight_kg",
     "mounting_notes", "vesa", "fit_notes", "archived",
 ]
 
-LISTING_FIELDS = provenance.TRACKED_FIELDS + ["product_id", "retailer_id", "active"]
+LISTING_FIELDS = provenance.TRACKED_FIELDS + [
+    "product_id", "retailer_id", "active", "seller_name", "seller_id", "offer_id", "offer_key",
+    "freight_postcode", "pickup_postcode",
+]
 
 VERDICTS = ["BUY", "MAYBE", "IGNORE"]
 
 #: Where a product sits in the process, as distinct from the verdict on it.
 #: ACTIVE    - being researched or hunted, alerts armed
-#: PURCHASED - bought; alerts off unless a price-protection window is open
+#: PURCHASED - bought; the active card remains watched
 #: PARKED    - set aside without deleting anything
 STATUSES = ["ACTIVE", "PURCHASED", "PARKED"]
 
@@ -41,6 +45,7 @@ STATUSES = ["ACTIVE", "PURCHASED", "PARKED"]
 #: identity colour (retailer_color, hashed from the retailer's id). The two never
 #: appear on the same page, so reusing one palette is not a collision risk.
 CANDIDATE_PALETTE = ["blue", "amber", "green", "violet", "orange", "teal", "pink", "taupe"]
+DEFAULT_PICKUP_RADIUS_KM = 25
 
 
 def normalise_model(model: str | None) -> str:
@@ -162,6 +167,79 @@ def retailer_color(retailer_id: int | None) -> str | None:
     return f"var(--candidate-{index + 1})"
 
 
+def household_settings(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT postcode, pickup_radius_km FROM household_settings WHERE id = 1"
+    ).fetchone()
+    return dict(row)
+
+
+def effective_freight_for_listing(
+    listing: Mapping[str, Any], household_postcode: str | None
+) -> tuple[Any, bool]:
+    """Return the freight value valid for this postcode and whether it is current.
+
+    Unmarked legacy quotes retain their behavior when no household postcode is set. A
+    location-tagged quote counts only when its postcode matches the current setting. The
+    saved freight value and its provenance remain untouched when the postcode moves.
+    """
+    freight = listing["freight"]
+    quote_postcode = listing["freight_postcode"]
+    stale = freight is not None and quote_postcode != household_postcode
+    return (None if stale else freight), not stale
+
+
+def pickup_current_for_listing(listing: Mapping[str, Any], household_postcode: str | None) -> bool:
+    """Whether saved pickup information is confirmed for the current postcode."""
+    has_info = listing["pickup_status"] is not None or listing["pickup_location"] is not None
+    return not has_info or listing["pickup_postcode"] == household_postcode
+
+
+def confirm_pickup_for_household(conn: sqlite3.Connection, listing_id: int) -> None:
+    postcode = household_settings(conn)["postcode"]
+    conn.execute("UPDATE listings SET pickup_postcode = ? WHERE id = ?", (postcode, listing_id))
+
+
+def clear_pickup_location_confirmation(conn: sqlite3.Connection, listing_id: int) -> None:
+    conn.execute("UPDATE listings SET pickup_postcode = NULL WHERE id = ?", (listing_id,))
+
+
+def confirm_freight_for_household(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Associate a manually entered freight value with the current household postcode."""
+    postcode = household_settings(conn)["postcode"]
+    conn.execute(
+        "UPDATE listings SET freight_postcode = ? WHERE id = ?", (postcode, listing_id)
+    )
+
+
+def clear_freight_location_confirmation(conn: sqlite3.Connection, listing_id: int) -> None:
+    """Do not treat a non-manual freight update as checked for the current postcode."""
+    conn.execute("UPDATE listings SET freight_postcode = NULL WHERE id = ?", (listing_id,))
+
+
+def update_household_settings(
+    conn: sqlite3.Connection, data: Mapping[str, Any]
+) -> dict[str, Any]:
+    current = household_settings(conn)
+    postcode = data.get("postcode", current["postcode"])
+    if postcode is not None:
+        if not isinstance(postcode, str):
+            raise ValueError("postcode must be a four-digit string or blank")
+        postcode = postcode.strip()
+        if postcode and (len(postcode) != 4 or not postcode.isascii() or not postcode.isdigit()):
+            raise ValueError("postcode must be a four-digit string")
+        postcode = postcode or None
+
+    radius = data.get("pickup_radius_km", current["pickup_radius_km"])
+    if isinstance(radius, bool) or not isinstance(radius, int) or not 1 <= radius <= 500:
+        raise ValueError("pickup_radius_km must be a whole number from 1 to 500")
+    conn.execute(
+        "UPDATE household_settings SET postcode = ?, pickup_radius_km = ? WHERE id = 1",
+        (postcode, radius),
+    )
+    return household_settings(conn)
+
+
 # --------------------------------------------------------------------------- products
 
 
@@ -179,6 +257,7 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
 
 
 def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
+    _validate_quantity(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     payload.setdefault("category", "general")
     payload.setdefault("verdict", "MAYBE")
@@ -199,6 +278,7 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str, Any]) -> None:
+    _validate_quantity(data, current=get_product(conn, product_id))
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     if "specs" in data:
         payload["specs_json"] = json.dumps(data["specs"] or {})
@@ -230,6 +310,23 @@ def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str,
     maybe_derive_price_targets(conn, product_id)
 
 
+def _validate_quantity(data: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> None:
+    quantity = data.get("quantity", current["quantity"] if current else None)
+    unit = data.get("quantity_unit", current["quantity_unit"] if current else None)
+    if quantity is None and unit in (None, ""):
+        return
+    if not isinstance(unit, str) or unit not in {"g", "kg", "ml", "L", "each"}:
+        raise ValueError("quantity unit must be g, kg, ml, L, or each")
+    if isinstance(quantity, bool):
+        raise ValueError("quantity must be a positive number")
+    try:
+        amount = float(quantity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quantity must be a positive number") from exc
+    if not 0 < amount < float("inf"):
+        raise ValueError("quantity must be a positive number")
+
+
 def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
     """Permanently remove a product and everything under it - listings, price
     history, purchases, research/llm jobs, offer matches - via the schema's own
@@ -249,6 +346,7 @@ def create_listing(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
     if not payload.get("product_id") or not payload.get("retailer_id"):
         raise ValueError("product_id and retailer_id are required")
     payload.setdefault("condition", "NEW")
+    payload["offer_key"] = payload.get("offer_key") or ""
     payload["created_at"] = payload["updated_at"] = utcnow()
     cols = ", ".join(payload)
     marks = ", ".join("?" for _ in payload)
@@ -257,9 +355,15 @@ def create_listing(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def find_listing(
-    conn: sqlite3.Connection, product_id: int, retailer_id: int, url: str | None = None
+    conn: sqlite3.Connection, product_id: int, retailer_id: int, url: str | None = None,
+    offer_key: str | None = None,
 ) -> sqlite3.Row | None:
     if url:
+        if offer_key is not None:
+            return conn.execute(
+                "SELECT * FROM listings WHERE product_id = ? AND retailer_id = ? AND url = ?"
+                " AND offer_key = ?", (product_id, retailer_id, url, offer_key),
+            ).fetchone()
         row = conn.execute(
             "SELECT * FROM listings WHERE product_id = ? AND retailer_id = ? AND url = ?",
             (product_id, retailer_id, url),
@@ -273,13 +377,29 @@ def find_listing(
 
 
 def enrich_listing(
-    conn: sqlite3.Connection, row: sqlite3.Row, product: Mapping[str, Any], penalty: float
+    conn: sqlite3.Connection, row: sqlite3.Row, product: Mapping[str, Any], penalty: float,
+    household_postcode: str | None,
 ) -> dict[str, Any]:
     """Attach delivered price, classification, provenance and verification to a listing row."""
     listing = dict(row)
+    listing["provenance"] = provenance.provenance_map(conn, listing["id"])
+    stale = any(value["state"] == provenance.STALE
+                for value in listing["provenance"].values())
+    from . import url_intake
+    domain = url_intake.bare_domain(listing.get("url") or "")
+    adapter_cls = url_intake.adapter_for_domain(domain) if domain else None
+    automatic = bool(adapter_cls and adapter_cls.slug == listing.get("retailer_adapter"))
+    listing["check_capability"] = "AUTOMATIC" if automatic else "MANUAL"
+    listing["check_status"] = (
+        "BLOCKED" if listing.get("check_error") else
+        "STALE" if stale else listing["check_capability"]
+    )
+    effective_freight, freight_current = effective_freight_for_listing(
+        listing, household_postcode
+    )
     delivered = pricing.delivered_price(
         listing["advertised_price"],
-        listing["freight"],
+        effective_freight,
         listing["cashback"],
         listing["rebate"],
         listing["coupon_discount"],
@@ -287,13 +407,23 @@ def enrich_listing(
     listing["delivered"] = delivered
     listing["delivered_price"] = delivered.value
     listing["delivered_resolved"] = delivered.resolved
+    listing["freight_current"] = freight_current
+    listing["pickup_current"] = pickup_current_for_listing(listing, household_postcode)
     listing["classification"] = pricing.classify(delivered, product)
     listing["classification_label"] = pricing.CLASS_LABELS[listing["classification"]]
     listing["diff_from_low"] = pricing.difference_from_low(
         delivered, product.get("lowest_known_price")
     )
-    listing["provenance"] = provenance.provenance_map(conn, listing["id"])
     listing["verification"] = provenance.verification_map(conn, listing["id"])
+    if not freight_current and listing["freight"] is not None:
+        listing["verification"]["freight"] = {
+            **listing["verification"]["freight"],
+            "status": provenance.STALE,
+            "note": (
+                f"Previous quote is for postcode {listing['freight_postcode'] or 'unknown'}; "
+                f"current postcode is {household_postcode}. Reconfirm freight."
+            ),
+        }
     listing["manual_fields"] = sorted(
         f for f, p in listing["provenance"].items() if p["manual_locked"]
     )
@@ -339,7 +469,10 @@ def listings_for_product(
         + where,
         (product["id"],),
     ).fetchall()
-    enriched = [enrich_listing(conn, r, product, penalty) for r in rows]
+    household_postcode = household_settings(conn)["postcode"]
+    enriched = [
+        enrich_listing(conn, r, product, penalty, household_postcode) for r in rows
+    ]
     key = SORT_KEYS.get(sort, SORT_KEYS["delivered"])
     enriched.sort(key=key)
     return enriched
@@ -365,6 +498,8 @@ def product_view(
     best = pricing.best_listing(listings, load_config().unresolved_freight_penalty)
     product["best_listing"] = best
     product["best_delivered"] = best["delivered_price"] if best else None
+    product["best_unit_price"] = pricing.unit_price(
+        product["best_delivered"], product.get("quantity"), product.get("quantity_unit"))
     product["best_retailer"] = best["retailer_name"] if best else None
     product["best_classification"] = best["classification"] if best else pricing.UNRESOLVED
     product["best_resolved"] = bool(best and best["delivered_resolved"])
@@ -476,7 +611,6 @@ def record_purchase(
         "UPDATE products SET status = 'PURCHASED', updated_at = ? WHERE id = ?",
         (utcnow(), product_id),
     )
-    archive_other_group_members(conn, product_id)
     # The purchase is itself an observation, and the best one: it is a price someone
     # actually paid rather than one a page advertised.
     conn.execute(
@@ -499,9 +633,8 @@ def undo_purchase(conn: sqlite3.Connection, product_id: int) -> bool:
     The price_history row is deliberately left behind: it records a price that really was
     paid, and history is append-only even when the bookkeeping was wrong.
 
-    Deliberately does not revive any group sibling that this purchase archived. Which
-    candidates you would still want back in the hunt is not derivable from "the purchase
-    was undone" - reviving them is a decision for whoever undid it, done by hand.
+    Group siblings remain in their existing watch state; undoing a purchase only changes
+    the purchased product and leaves its append-only price observation behind.
     """
     purchase = latest_purchase(conn, product_id)
     if not purchase:
@@ -566,13 +699,12 @@ def set_product_group(
 
 
 def archive_other_group_members(conn: sqlite3.Connection, purchased_product_id: int) -> int:
-    """Buying one candidate settles the question for the rest of its group.
+    """Explicitly archive every alternative to a chosen group candidate.
 
-    Archives every OTHER product in the same group (never the one just purchased -
-    its own status is already PURCHASED) and marks the group itself archived, so its
-    board card stops appearing and none of its members can start a new research job
-    (research.create_job refuses on an archived product). Returns how many were
-    archived, for the caller to report.
+    This lifecycle operation is separate from recording a purchase: purchase does not
+    determine whether the household wants to keep watching the other candidates. Archives
+    every OTHER product in the same group and marks the group itself archived. Returns
+    how many products were archived.
     """
     product = get_product(conn, purchased_product_id)
     if product is None or product["group_id"] is None:
@@ -632,13 +764,14 @@ def group_view(
                 "retailer_name": listing["retailer_name"],
                 "value": listing["delivered_price"],
                 "resolved": bool(listing["delivered_resolved"]),
-                "ruled_out": bool(listing.get("ruled_out")),
+                "ruled_out": not pricing.listing_is_comparable(listing),
+                "verification": listing.get("verification"),
                 "candidate_color": member["candidate_color"],
             })
     group["scale"] = pricing.merge_price_points(points)
     # Same rule as a single product's best_listing: a ruled-out candidate never wins,
     # however cheap.
-    contenders = [p for p in points if not p["ruled_out"]]
+    contenders = [p for p in points if pricing.listing_is_comparable(p)]
     group["best"] = min(contenders, key=lambda p: p["value"]) if contenders else None
     return group
 
@@ -656,10 +789,9 @@ def delete_group_if_empty(conn: sqlite3.Connection, group_id: int) -> bool:
     """Delete a group once nothing points at it any more, and only then.
 
     "Empty" means no product's group_id references it - not "every member is
-    archived". A resolved group (a purchase archived the rest, see
-    archive_other_group_members) keeps every member's group_id exactly as it was:
-    "these were the candidates, this one won" is real history, the same reason a
-    product is archived rather than deleted. Auto-deleting on that would erase it.
+    archived". An explicitly resolved group keeps every member's group_id exactly as it
+    was: "these were the candidates" is useful history, the same reason a product is
+    archived rather than deleted. Auto-deleting on that would erase it.
     This only fires from an action that actually detaches a product from the group -
     "Leave group", or a permanent product delete - never from archiving.
 
@@ -693,17 +825,19 @@ def list_products(
     groups separately. The JSON API (GET /api/products) leaves this off by default, so
     an API consumer still sees every product, grouped or not.
 
-    Only excludes membership in a STILL-ACTIVE group. Once a group resolves (a purchase
-    archived the rest and the group itself), the purchased product's own group_id is
-    left untouched as a historical fact - "which candidates it was chosen over" - but
+    Only excludes membership in a STILL-ACTIVE group. If a group is explicitly archived,
+    the product's own group_id is left untouched as a historical fact - "which candidates
+    were considered" - but
     that must never make the product itself invisible: its own group's card has
     stopped rendering (list_groups excludes archived groups), so if this exclusion
     still hid it too, a purchased, non-archived product would vanish from the board
     entirely.
     """
-    clauses = [] if include_archived else ["archived = 0"]
+    clauses = ["archived = 1"] if status and status.upper() == "ARCHIVED" else (
+        [] if include_archived else ["archived = 0"]
+    )
     params: list[Any] = []
-    if status and status.upper() != "ALL":
+    if status and status.upper() not in ("ALL", "ARCHIVED"):
         clauses.append("status = ?")
         params.append(status.upper())
     if exclude_grouped:
@@ -728,9 +862,8 @@ def status_counts(conn: sqlite3.Connection) -> dict[str, int]:
     PARKED) member of a still-active group has no such stand-in: nothing on the
     board shows it as bought, so counting it there produced a "Bought 1" badge
     that opened onto an empty tab - a resolved-looking number with nothing behind
-    it. Excluded here for any status but ACTIVE; once its group archives (a real
-    purchase resolves the hunt) group_id stays but the exclusion no longer
-    applies, and it counts normally.
+    it. It is excluded from status tallies while its active group represents it on the
+    group card. A purchase leaves the active group and its alternatives intact.
     """
     rows = conn.execute(
         """
@@ -745,7 +878,10 @@ def status_counts(conn: sqlite3.Connection) -> dict[str, int]:
         """
     )
     counts = {row["status"]: row["n"] for row in rows}
-    counts["ALL"] = sum(counts.values())
+    counts["ARCHIVED"] = conn.execute(
+        "SELECT COUNT(*) FROM products WHERE archived = 1"
+    ).fetchone()[0]
+    counts["ALL"] = sum(count for status, count in counts.items() if status != "ARCHIVED")
     return counts
 
 
@@ -765,8 +901,11 @@ def record_observation(
     row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
     if row is None or row["advertised_price"] is None:
         return None
+    current_freight, _freight_current = effective_freight_for_listing(
+        row, household_settings(conn)["postcode"]
+    )
     delivered = pricing.delivered_price(
-        row["advertised_price"], row["freight"], row["cashback"], row["rebate"],
+        row["advertised_price"], current_freight, row["cashback"], row["rebate"],
         row["coupon_discount"],
     )
     cur = conn.execute(
