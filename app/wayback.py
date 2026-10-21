@@ -176,7 +176,7 @@ def _model_price_from_html(html: bytes, expected_model: str) -> float | None:
                     if isinstance(offer.get("price"), bool):
                         continue
                     price = float(offer.get("price"))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
                 if 0 < price < 10_000_000:
                     return round(price, 2)
@@ -312,7 +312,7 @@ def valid_archive_snapshot(original_url: str, expected_model: str, item: dict) -
             return None
         price = float(item.get("advertised_price"))
         captured = datetime.strptime(item.get("captured_at", ""), "%Y-%m-%dT%H:%M:%SZ")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     timestamp = captured.strftime("%Y%m%d%H%M%S")
     expected_snapshot = (

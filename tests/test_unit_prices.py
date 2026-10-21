@@ -11,6 +11,10 @@ def test_unit_price_does_not_guess_unknown_or_incompatible_quantities():
     assert pricing.unit_price(12.50, 2, "each") == (6.25, "each")
 
 
+def test_unit_price_does_not_return_an_infinite_result():
+    assert pricing.unit_price(1e308, 1e-308, "g") is None
+
+
 def test_unit_price_is_exposed_for_each_separate_product(client):
     small = client.post("/api/products", json={
         "name": "Protein powder vanilla 500 g", "model": "PROTEIN-VAN-500",
@@ -58,6 +62,11 @@ def test_quantity_is_validated_at_http_boundary_and_can_be_cleared(client):
             "quantity": quantity, "quantity_unit": "g",
         })
         assert response.status_code == 400
+    response = client.post("/api/products", json={
+        "name": "Huge quantity", "model": "TEST-HUGE-Q", "quantity": 10**1000,
+        "quantity_unit": "g",
+    })
+    assert response.status_code == 400
     for unit in ([], {}):
         response = client.patch(f"/api/products/{product['id']}", json={
             "quantity": 500, "quantity_unit": unit,

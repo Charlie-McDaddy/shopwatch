@@ -348,7 +348,7 @@ def _validate_quantity(data: Mapping[str, Any], current: Mapping[str, Any] | Non
         raise ValueError("quantity must be a positive number")
     try:
         amount = float(quantity)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("quantity must be a positive number") from exc
     if not 0 < amount < float("inf"):
         raise ValueError("quantity must be a positive number")
