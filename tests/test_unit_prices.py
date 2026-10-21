@@ -39,8 +39,16 @@ def test_unit_price_is_exposed_for_each_separate_product(client):
     assert large["best_unit_price"] == [15.0, "kg"]
     assert small["best_delivered"] == 10 and large["best_delivered"] == 15
     assert small["best_unit_price"] != large["best_unit_price"]
-    html = client.get(f"/products/{small['id']}").text
-    assert "Pack: 500.0 g" in html and "Best: $20 per kg" in html
+    small_html = client.get(f"/products/{small['id']}").text
+    large_html = client.get(f"/products/{large['id']}").text
+    assert "Pack: 500.0 g" in small_html and "Best: $20 per kg" in small_html
+    assert "Pack: 1.0 kg" in large_html and "Best: $15 per kg" in large_html
+
+    small_history = client.get(f"/api/price-history/{small['id']}").json()
+    large_history = client.get(f"/api/price-history/{large['id']}").json()
+    assert small_history and large_history
+    assert {row["product_id"] for row in small_history} == {small["id"]}
+    assert {row["product_id"] for row in large_history} == {large["id"]}
 
 
 def test_quantity_is_validated_at_http_boundary_and_can_be_cleared(client):
@@ -79,3 +87,16 @@ def test_snapshot_round_trip_preserves_pack_quantity(conn):
 def test_legacy_product_without_quantity_remains_valid(conn):
     product_id = store.create_product(conn, {"name": "Old entry", "model": "OLD-1"})
     assert store.get_product(conn, product_id)["quantity"] is None
+
+
+def test_snapshot_without_quantity_fields_remains_importable(conn):
+    from app import ingest
+
+    snapshot = {
+        "format": "shopwatch-snapshot",
+        "version": 1,
+        "products": [{"id": 1, "name": "Old protein", "model": "OLD-PROTEIN"}],
+    }
+    assert ingest.import_snapshot(conn, snapshot)["products"] == 1
+    product = store.get_product(conn, 1)
+    assert product["quantity"] is None and product["quantity_unit"] is None

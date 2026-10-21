@@ -1311,6 +1311,36 @@ def test_pause_resume_and_restore_keep_the_same_product_and_history(client):
     assert client.patch(f"/api/products/{pid}", json={"status": "ACTIVE"}).json()["status"] == "ACTIVE"
 
 
+def test_late_research_findings_do_not_resume_or_alert_a_parked_or_archived_product(client):
+    product = q930h(client)
+    pid = product["id"]
+    listing_id = next(row["id"] for row in product["listings"]
+                      if row["retailer_name"] == "Crowdshop")
+    finding = {
+        "model": product["model"], "retailer": "Crowdshop", "price": 500,
+        "freight": 0, "stock": "In Stock", "source": "research-runner",
+    }
+
+    client.patch(f"/api/products/{pid}", json={"status": "PARKED"})
+    assert client.post("/api/import", json={"findings": [finding]}).json()["applied"] == 1
+    client.patch(f"/api/retailers/{listing_id}", json={"freight": 0})
+    for aspect in ("model", "price", "stock"):
+        client.post(f"/api/retailers/{listing_id}/verification",
+                    json={"aspect": aspect, "status": "VERIFIED"})
+    paused = client.get(f"/api/products/{pid}").json()
+    assert paused["status"] == "PARKED"
+    assert client.post("/api/alerts/evaluate").json()["alerts"] == []
+
+    client.patch(f"/api/products/{pid}", json={"status": "ACTIVE"})
+    assert client.post("/api/alerts/evaluate").json()["alerts"], "control: active cards can alert"
+
+    client.delete(f"/api/products/{pid}")
+    assert client.post("/api/import", json={"findings": [finding]}).json()["applied"] == 1
+    archived = client.get(f"/api/products/{pid}").json()
+    assert archived["archived"] == 1
+    assert client.post("/api/alerts/evaluate").json()["alerts"] == []
+
+
 def test_household_location_preferences_default_and_persist(client):
     initial = client.get("/api/household-settings").json()
     assert initial == {
