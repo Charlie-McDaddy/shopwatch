@@ -124,3 +124,19 @@ def test_a_job_running_within_the_ceiling_is_left_alone(conn):
     job = llm_jobs.get_job(conn, job_id)
 
     assert job["status"] == "RUNNING"
+
+
+def test_completed_model_candidates_keep_valid_card_metadata_only(conn):
+    job_id = llm_jobs.create_job(conn, "Protein powder")
+    payload = json.dumps({"candidates": [{
+        "model": "WHEY-9", "label": "Whey", "variant": "Vanilla 1 kg",
+        "description": "Vanilla whey protein", "image_url": "https://images.example/whey.jpg",
+    }, {
+        "model": "WHEY-10", "variant": ["bad"], "image_url": "https://127.0.0.1/private.jpg",
+    }]})
+    llm_jobs.complete_job(conn, job_id, "DONE", result=payload)
+    candidates = json.loads(llm_jobs.get_job(conn, job_id)["result"])["candidates"]
+    assert candidates[0]["variant"] == "Vanilla 1 kg"
+    assert candidates[0]["description"] == "Vanilla whey protein"
+    assert candidates[0]["image_url"] == "https://images.example/whey.jpg"
+    assert candidates[1] == {"model": "WHEY-10", "label": "WHEY-10"}

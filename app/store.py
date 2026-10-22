@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import re
 import sqlite3
@@ -10,12 +9,12 @@ import zlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
-from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from . import pricing, provenance
 from .config import load_config
 from .db import utcnow
+from .urls import public_http_url
 
 PRODUCT_FIELDS = [
     "name", "model", "variant", "description", "image_url", "brand", "category",
@@ -65,7 +64,7 @@ def normalise_model(model: str | None) -> str:
     HW-Q930H/XY, hw q930h/xy and HWQ930H/XY are the same product. Region suffixes are
     kept, because HW-Q930H/XY and HW-Q930H/XU are genuinely different stock.
     """
-    if not model:
+    if not isinstance(model, str) or not model:
         return ""
     return re.sub(r"[^A-Z0-9/]", "", model.upper())
 
@@ -263,52 +262,66 @@ def update_household_settings(
 # --------------------------------------------------------------------------- products
 
 
-def product_by_model(conn: sqlite3.Connection, model: str) -> sqlite3.Row | None:
-    """Exact-model match, tolerant of punctuation and case only."""
+def normalise_variant(variant: str | None) -> str:
+    """Variant identity ignores case and repeated whitespace, while keeping wording."""
+    return " ".join(variant.split()).casefold() if isinstance(variant, str) else ""
+
+
+_UNSPECIFIED_VARIANT = object()
+
+
+def products_by_model(conn: sqlite3.Connection, model: str) -> list[sqlite3.Row]:
     target = normalise_model(model)
-    for row in conn.execute("SELECT * FROM products"):
-        if normalise_model(row["model"]) == target:
-            return row
-    return None
+    return [row for row in conn.execute("SELECT * FROM products")
+            if normalise_model(row["model"]) == target]
+
+
+def product_by_model(
+    conn: sqlite3.Connection, model: str, variant: str | None | object = _UNSPECIFIED_VARIANT
+) -> sqlite3.Row | None:
+    """Match model plus variant, or a model-only lookup only when it is unambiguous."""
+    matches = products_by_model(conn, model)
+    if variant is _UNSPECIFIED_VARIANT:
+        return matches[0] if len(matches) == 1 else None
+    variant_key = normalise_variant(variant)
+    return next((row for row in matches if normalise_variant(row["variant"]) == variant_key), None)
 
 
 def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
 
 
-def _validate_image_url(value: Any) -> None:
-    if value in (None, ""):
-        return
-    if not isinstance(value, str):
-        raise ValueError("image URL must be HTTPS on a public host")
-    try:
-        parsed = urlsplit(value.strip())
-        host = (parsed.hostname or "").lower().rstrip(".")
-    except ValueError as exc:
-        raise ValueError("image URL must be HTTPS on a public host") from exc
-    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
-        raise ValueError("image URL must be HTTPS on a public host")
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        if "." not in host or host == "localhost" or host.endswith(
-            (".local", ".internal", ".localhost")
+def validate_product_metadata(data: Mapping[str, Any]) -> None:
+    for field, limit in (("variant", 200), ("description", 5000), ("image_url", 2048)):
+        value = data.get(field)
+        if value in (None, ""):
+            continue
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValueError(
+                f"{field.replace('_', ' ')} must be a string of at most {limit} characters"
+            )
+        if field == "image_url" and (
+            value[:8].lower() != "https://" or not public_http_url(value)
         ):
-            raise ValueError("image URL must be HTTPS on a public host") from None
-    else:
-        if not address.is_global:
             raise ValueError("image URL must be HTTPS on a public host")
 
 
 def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
-    _validate_image_url(data.get("image_url"))
+    validate_product_metadata(data)
     _validate_quantity(data)
     _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
+    for field in ("variant", "description", "image_url"):
+        if isinstance(payload.get(field), str):
+            payload[field] = payload[field].strip() or None
     payload.setdefault("category", "general")
     payload.setdefault("verdict", "MAYBE")
-    if not payload.get("name") or not payload.get("model"):
-        raise ValueError("name and model are required")
+    if not isinstance(payload.get("name"), str) or not payload["name"].strip():
+        raise ValueError("name is required")
+    if not isinstance(payload.get("model"), str) or not payload["model"].strip():
+        raise ValueError("model is required")
+    if product_by_model(conn, payload["model"], payload.get("variant")):
+        raise ValueError("this exact product model and variant already exists")
     payload["specs_json"] = json.dumps(data.get("specs") or {})
     payload["components_json"] = json.dumps(data.get("components") or {})
     payload["created_at"] = payload["updated_at"] = utcnow()
@@ -327,9 +340,18 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str, Any]) -> None:
-    if "image_url" in data:
-        _validate_image_url(data["image_url"])
-    _validate_quantity(data, current=get_product(conn, product_id))
+    validate_product_metadata(data)
+    current = get_product(conn, product_id)
+    _validate_quantity(data, current=current)
+    if "name" in data and (not isinstance(data["name"], str) or not data["name"].strip()):
+        raise ValueError("name is required")
+    if "model" in data and (not isinstance(data["model"], str) or not data["model"].strip()):
+        raise ValueError("model is required")
+    model = data.get("model", current["model"] if current else None)
+    variant = data.get("variant", current["variant"] if current else None)
+    duplicate = product_by_model(conn, model, variant) if model else None
+    if duplicate and duplicate["id"] != product_id:
+        raise ValueError("this exact product model and variant already exists")
     _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
     if "specs" in data:

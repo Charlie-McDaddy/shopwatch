@@ -178,7 +178,7 @@ prices.
 
 Product: {product_name}
 Exact model: {model}
-Retailer: {retailer_name}{homepage_hint}
+{variant_hint}Retailer: {retailer_name}{homepage_hint}
 
 Find this exact model's current price at this retailer only. If you cannot find this
 exact model at this retailer (wrong model, no listing, the page blocks automated
@@ -212,7 +212,7 @@ category - only report a price you can point to a source for.
 
 Product: {product_name}
 Exact model: {model}
-{excluded_section}
+{variant_hint}{excluded_section}
 Find the lowest confirmed price you can for this exact model, at any legitimate
 Australian retailer, at any point in time (including now, if today's price happens to
 be the lowest ever seen). If you cannot find a specific historical price you are
@@ -257,7 +257,7 @@ better one.
 
 Product: {product_name}
 Exact model: {model}
-Retailer: {retailer_name}
+{variant_hint}Retailer: {retailer_name}
 URL: {url}
 
 Read that page and find this exact model's current price. If the page cannot be
@@ -498,6 +498,7 @@ def research_one_retailer(
     retailer_name: str,
     homepage: str | None,
     url: str | None = None,
+    variant: str | None = None,
 ) -> dict[str, Any]:
     """Ask the headless CLI about one retailer. Returns a parsed finding or raises RunnerError.
 
@@ -509,14 +510,15 @@ def research_one_retailer(
     """
     if url:
         prompt = PROMPT_URL.format(
-            product_name=product_name, model=model, retailer_name=retailer_name, url=url
+            product_name=product_name, model=model, retailer_name=retailer_name, url=url,
+            variant_hint=f"Variant: {variant}\n" if variant else "",
         )
         allowed_tools = "WebFetch"
     else:
         hint = f" ({homepage})" if homepage else ""
         prompt = PROMPT.format(
             product_name=product_name, model=model, retailer_name=retailer_name,
-            homepage_hint=hint,
+            homepage_hint=hint, variant_hint=f"Variant: {variant}\n" if variant else "",
         )
         allowed_tools = "WebSearch,WebFetch"
     try:
@@ -559,7 +561,7 @@ def _excluded_retailers_section(excluded_names: list[str] | None) -> str:
 
 def research_historical_low(
     base_url: str, claude_bin: str, product_name: str, model: str,
-    excluded_names: list[str] | None = None,
+    excluded_names: list[str] | None = None, variant: str | None = None,
 ) -> dict[str, Any]:
     """Ask the headless CLI for the product's historical low. One call, whole product -
     see HISTORICAL_LOW_PROMPT. Returns a parsed finding (which may honestly be "not
@@ -567,6 +569,7 @@ def research_historical_low(
     missing binary, non-zero exit)."""
     prompt = HISTORICAL_LOW_PROMPT.format(
         product_name=product_name, model=model,
+        variant_hint=f"Variant: {variant}\n" if variant else "",
         excluded_section=_excluded_retailers_section(excluded_names),
     )
     try:
@@ -618,6 +621,7 @@ def process_historical_low_job(base_url: str, claude_bin: str, job: dict[str, An
     try:
         found = research_historical_low(
             base_url, claude_bin, product["name"], product["model"], excluded_names,
+            variant=product.get("variant"),
         )
     except RunnerError as exc:
         log.info("job %s historical-low: %s (%s)", job["id"], exc.status, exc.note)
@@ -660,6 +664,7 @@ def process_job(base_url: str, claude_bin: str, job: dict[str, Any]) -> None:
             found = research_one_retailer(
                 base_url, claude_bin, product["name"], product["model"],
                 retailer_name, result.get("retailer_homepage"), result.get("url"),
+                variant=product.get("variant"),
             )
         except RunnerError as exc:
             log.info("job %s / %s: %s (%s)", job["id"], retailer_name, exc.status, exc.note)
@@ -674,8 +679,8 @@ def process_job(base_url: str, claude_bin: str, job: dict[str, Any]) -> None:
         imported = requests.post(
             f"{base_url}/api/import",
             json={"findings": [{
-                "model": product["model"], "retailer": retailer_name,
-                "price": found["price"], "stock": found.get("stock"),
+                "model": product["model"], "variant": product.get("variant"),
+                "retailer": retailer_name, "price": found["price"], "stock": found.get("stock"),
                 "url": found.get("url"), "source": "research-runner",
             }]},
             timeout=30,
@@ -840,12 +845,12 @@ def _contains_exact_model(model: str, title: str) -> bool:
 
 def discover_retailers(
     firecrawl_url: str, product_name: str, model: str,
-    excluded_names: list[str], excluded_homepages: list[str],
+    excluded_names: list[str], excluded_homepages: list[str], variant: str | None = None,
 ) -> dict[str, Any]:
     """Ask Firecrawl who else sells this, excluding retailers already known for this
     product. Raises on any failure to search - a failed search must never look like a
     successful search that simply found nothing (hardening.md rule 2)."""
-    query = f"{product_name} {model} buy Australia".strip()
+    query = f"{product_name} {model} {variant or ''} buy Australia".strip()
     try:
         resp = requests.post(
             f"{firecrawl_url}/v1/search",
@@ -891,6 +896,7 @@ def process_retailer_search_job(base_url: str, firecrawl_url: str, job: dict[str
         prompt = (
             "Use web search to find Australian retailers selling this exact product. "
             "Exclude the supplied retailer names and homepages; never substitute a variant. "
+            "Use the variant when supplied to find the same size/flavour/configuration. "
             "Return only JSON: {\"retailers\":[{\"name\":\"retailer name\","
             "\"homepage\":\"public homepage URL\",\"source_url\":\"exact product page URL\","
             "\"source_title\":\"page title containing the exact model\"}],\"note\":null}. "
@@ -911,6 +917,7 @@ def process_retailer_search_job(base_url: str, firecrawl_url: str, job: dict[str
         result = discover_retailers(
             firecrawl_url, query.get("product_name", ""), query.get("model", ""),
             query.get("excluded_names") or [], query.get("excluded_homepages") or [],
+            query.get("variant"),
         )
     requests.post(
         f"{base_url}/api/retailer-search-jobs/{job['id']}/complete",

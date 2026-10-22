@@ -124,7 +124,9 @@ def test_a_job_running_within_the_ceiling_is_left_alone(conn):
 def test_product_discovery_uses_exact_variant_and_known_retailers(conn):
     from app import store
 
-    product_id = store.create_product(conn, {"name": "Dreame RoboMower", "model": "A1-2026"})
+    product_id = store.create_product(conn, {
+        "name": "Dreame RoboMower", "model": "A1-2026", "variant": "4 Ah battery",
+    })
     retailer_id = store.ensure_retailer(conn, "Bunnings", homepage="https://bunnings.com.au")["id"]
     store.create_listing(conn, {"product_id": product_id, "retailer_id": retailer_id})
 
@@ -137,6 +139,7 @@ def test_product_discovery_uses_exact_variant_and_known_retailers(conn):
     query = json.loads(job["query"])
     assert query == {
         "product_name": "Dreame RoboMower", "model": "A1-2026",
+        "variant": "4 Ah battery",
         "excluded_names": ["Bunnings"], "excluded_homepages": ["https://bunnings.com.au"],
     }
     assert job["product_id"] == product_id
