@@ -111,7 +111,7 @@ def request_product_discovery(
     if trigger not in {"initial", "weekly", "manual"}:
         raise ValueError("trigger must be initial, weekly, or manual")
     product = conn.execute(
-        "SELECT name, model, archived, status FROM products WHERE id = ?", (product_id,)
+        "SELECT name, model, variant, archived, status FROM products WHERE id = ?", (product_id,)
     ).fetchone()
     if product is None:
         raise ValueError("unknown product")
@@ -129,6 +129,7 @@ def request_product_discovery(
     ).fetchall()
     query = json.dumps({
         "product_name": product["name"], "model": product["model"],
+        "variant": product["variant"],
         "excluded_names": [r["name"] for r in rows],
         "excluded_homepages": [r["homepage"] for r in rows if r["homepage"]],
     })

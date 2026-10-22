@@ -505,7 +505,7 @@ def api_products(include_archived: bool = False, status: str | None = None) -> A
 
 
 @app.get("/api/products/check-model")
-def api_check_model(model: str = Query(...)) -> Any:
+def api_check_model(model: str = Query(...), variant: str | None = Query(None)) -> Any:
     """Deterministic model-confirmation check for the wizard.
 
     Free and instant: catches a typo'd duplicate before the wizard ever reaches its
@@ -514,11 +514,15 @@ def api_check_model(model: str = Query(...)) -> Any:
     punctuation and case are normalised (store.normalise_model).
     """
     with session() as conn:
-        existing = store.product_by_model(conn, model)
+        existing = (
+            store.product_by_model(conn, model, variant)
+            if variant is not None else store.product_by_model(conn, model)
+        )
     return {
         "normalised": store.normalise_model(model),
         "duplicate_of": (
-            {"id": existing["id"], "name": existing["name"], "model": existing["model"]}
+            {"id": existing["id"], "name": existing["name"], "model": existing["model"],
+             "variant": existing["variant"]}
             if existing else None
         ),
     }
@@ -634,6 +638,12 @@ def api_remove_product_group(product_id: int) -> Any:
 @app.post("/api/products", status_code=201)
 def api_create_product(payload: dict = Body(...)) -> Any:
     with session() as conn:
+        if payload.get("model") and store.product_by_model(
+            conn, payload["model"], payload.get("variant")
+        ):
+            raise HTTPException(
+                409, "this exact product model and variant are already on the watchlist"
+            )
         try:
             product_id = store.create_product(conn, payload)
         except ValueError as exc:

@@ -69,8 +69,20 @@ def import_finding(
         raise ImportError_("finding has no model")
     if not retailer_name:
         raise ImportError_("finding has no retailer")
+    if "variant" in finding and finding["variant"] is not None and not isinstance(
+        finding["variant"], str
+    ):
+        raise ImportError_("finding variant must be a string")
 
-    product = store.product_by_model(conn, model)
+    if "variant" in finding:
+        product = store.product_by_model(conn, model, finding.get("variant"))
+    else:
+        matches = store.products_by_model(conn, model)
+        if len(matches) > 1:
+            raise ImportError_(
+                f"model {model!r} matches multiple variants; finding must include variant"
+            )
+        product = matches[0] if matches else None
     if product is None:
         if not create_missing_product:
             raise ImportError_(f"no product matches model {model!r}")
@@ -79,6 +91,7 @@ def import_finding(
             {
                 "name": finding.get("product_name") or model,
                 "model": model,
+                "variant": finding.get("variant"),
                 "brand": finding.get("brand"),
                 "category": finding.get("category") or "general",
             },
@@ -288,7 +301,22 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
 
     product_ids: dict[Any, int] = {}
     for snap in data.get("products", []):
-        existing = store.product_by_model(conn, snap.get("model", ""))
+        try:
+            store.validate_product_metadata(snap)
+        except ValueError as exc:
+            report["errors"].append(f"product {snap.get('id')}: {exc}")
+            continue
+        model = snap.get("model", "")
+        if "variant" in snap:
+            existing = store.product_by_model(conn, model, snap.get("variant"))
+        else:
+            matches = store.products_by_model(conn, model)
+            if len(matches) > 1:
+                report["errors"].append(
+                    f"product {snap.get('id')}: model {model!r} matches multiple variants"
+                )
+                continue
+            existing = matches[0] if matches else None
         payload = {k: v for k, v in snap.items() if k in store.PRODUCT_FIELDS}
         payload["specs"] = json.loads(snap.get("specs_json") or "{}")
         payload["components"] = json.loads(snap.get("components_json") or "{}")

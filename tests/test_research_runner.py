@@ -171,12 +171,18 @@ def _fake_search_response(monkeypatch, data, success=True):
 
 
 def test_discover_retailers_returns_candidates_from_search_results(monkeypatch):
+    searches = []
     _fake_search_response(monkeypatch, [
         {"url": "https://www.newstore.example/product", "title": "HW-Q930H Soundbar | New Store"},
     ])
+    fake_response = research_runner.requests.post
+    monkeypatch.setattr(research_runner.requests, "post", lambda url, **kwargs: (
+        searches.append(kwargs["json"]["query"]) or fake_response(url, **kwargs)
+    ))
     result = research_runner.discover_retailers(
-        "http://firecrawl", "Samsung Soundbar", "HW-Q930H", [], [],
+        "http://firecrawl", "Samsung Soundbar", "HW-Q930H", [], [], "4 Ah battery",
     )
+    assert searches == ["Samsung Soundbar HW-Q930H 4 Ah battery buy Australia"]
     assert result["retailers"] == [{
         "name": "New Store", "homepage": "https://newstore.example",
         "source_url": "https://www.newstore.example/product",
@@ -723,7 +729,7 @@ def test_process_historical_low_job_forwards_other_retailers(monkeypatch):
         if url.endswith("/api/retailers"):
             resp._data = [{"id": 1, "name": "Bing Lee", "excluded": False}]
         else:
-            resp._data = {"name": "Some Product", "model": "SKU-1"}
+            resp._data = {"name": "Some Product", "model": "SKU-1", "variant": "Vanilla 1 kg"}
         return resp
 
     posted = []
@@ -734,7 +740,8 @@ def test_process_historical_low_job_forwards_other_retailers(monkeypatch):
         resp._data = {}
         return resp
 
-    def fake_research_historical_low(base_url, claude_bin, product_name, model, excluded_names=None):
+    def fake_research_historical_low(base_url, claude_bin, product_name, model, excluded_names=None, variant=None):
+        assert variant == "Vanilla 1 kg"
         return {
             "found": True, "price": 899, "date": "2025-11-20", "retailer": "Bing Lee",
             "confidence": "MEDIUM", "reason": "ok",
@@ -822,8 +829,11 @@ def test_process_historical_low_job_only_forwards_excluded_retailer_names(monkey
 
     captured = {}
 
-    def fake_research_historical_low(base_url, claude_bin, product_name, model, excluded_names=None):
+    def fake_research_historical_low(
+        base_url, claude_bin, product_name, model, excluded_names=None, variant=None
+    ):
         captured["excluded_names"] = excluded_names
+        captured["variant"] = variant
         return {
             "found": False, "price": None, "date": None, "retailer": None,
             "confidence": None, "reason": "not found", "other_retailers": [],
@@ -833,6 +843,7 @@ def test_process_historical_low_job_only_forwards_excluded_retailer_names(monkey
 
     research_runner.process_historical_low_job("http://x", "claude", {"id": 1, "product_id": 1})
     assert captured["excluded_names"] == ["Bing Lee"]
+    assert captured["variant"] is None
 
 
 def test_process_historical_low_job_fails_the_job_when_the_retailer_list_cannot_be_loaded(
@@ -851,7 +862,7 @@ def test_process_historical_low_job_fails_the_job_when_the_retailer_list_cannot_
         if url.endswith("/api/retailers"):
             raise research_runner.requests.RequestException("connection refused")
         resp = FakeResponse()
-        resp._data = {"name": "Some Product", "model": "SKU-1"}
+        resp._data = {"name": "Some Product", "model": "SKU-1", "variant": "Vanilla 1 kg"}
         return resp
 
     posted = []
@@ -969,7 +980,7 @@ def test_process_job_passes_the_result_row_url_through(monkeypatch):
     captured_urls = []
 
     def fake_research_one_retailer(base_url, claude_bin, product_name, model,
-                                    retailer_name, homepage, url=None):
+                                    retailer_name, homepage, url=None, variant=None):
         captured_urls.append(url)
         return {"price": 100, "stock": None, "url": url, "reason": "ok"}
 
@@ -979,7 +990,7 @@ def test_process_job_passes_the_result_row_url_through(monkeypatch):
 
     def fake_get(url, timeout=None):
         resp = FakeResponse()
-        resp._data = {"name": "Some Product", "model": "SKU-1"}
+        resp._data = {"name": "Some Product", "model": "SKU-1", "variant": "Vanilla 1 kg"}
         return resp
 
     posted = []
@@ -1007,3 +1018,6 @@ def test_process_job_passes_the_result_row_url_through(monkeypatch):
     research_runner.process_job("http://x", "claude", job)
 
     assert captured_urls == ["https://www.centrecom.com.au/x", None]
+    imports = [body for url, body in posted if url == "http://x/api/import"]
+    assert len(imports) == 2
+    assert all(body["findings"][0]["variant"] == "Vanilla 1 kg" for body in imports)

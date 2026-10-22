@@ -821,7 +821,8 @@ async function wizShowDone(job) {
 wire('btn-new-product', async () => {
   wiz = { index: 0, productId: null, retailers: [], selected: new Set(), pollTimer: null };
   for (const id of ['wiz-name', 'wiz-model', 'wiz-brand', 'wiz-notes', 'wiz-trigger',
-    'wiz-excellent', 'wiz-histlow', 'wiz-new-retailer', 'wiz-new-group']) {
+    'wiz-excellent', 'wiz-histlow', 'wiz-new-retailer', 'wiz-new-group',
+    'wiz-variant', 'wiz-description', 'wiz-image-url']) {
     document.getElementById(id).value = '';
   }
   document.getElementById('wiz-category').value = 'general';
@@ -845,21 +846,25 @@ wire('btn-new-product', async () => {
 // The empty-board onboarding CTA opens the exact same wizard, not a second one.
 wire('btn-empty-cta', () => document.getElementById('btn-new-product').click());
 
-document.getElementById('wiz-model')?.addEventListener('blur', async event => {
-  const model = event.target.value.trim();
+async function wizCheckProductIdentity() {
+  const model = wizVal('wiz-model'), variant = wizVal('wiz-variant');
   const warning = document.getElementById('wiz-model-warning');
   if (!model) { warning.hidden = true; return; }
   try {
-    const result = await api(`/api/products/check-model?model=${encodeURIComponent(model)}`);
+    const query = new URLSearchParams({ model, variant });
+    const result = await api(`/api/products/check-model?${query}`);
     if (result.duplicate_of) {
       warning.hidden = false;
-      warning.textContent = `This looks like the same model as an existing product: `
-        + `"${result.duplicate_of.name}" (${result.duplicate_of.model}).`;
+      warning.textContent = `This exact model and variant are already watched: `
+        + `"${result.duplicate_of.name}" (${result.duplicate_of.model}`
+        + `${result.duplicate_of.variant ? `, ${result.duplicate_of.variant}` : ''}).`;
     } else {
       warning.hidden = true;
     }
   } catch { /* the deterministic check is a courtesy, never a blocker */ }
-});
+}
+document.getElementById('wiz-model')?.addEventListener('blur', wizCheckProductIdentity);
+document.getElementById('wiz-variant')?.addEventListener('blur', wizCheckProductIdentity);
 
 /* Polls a queued job row (llm_jobs or retailer_search_jobs - same {status, result,
  * error} shape) until it lands, same idea as wizPoll() for research jobs below.
@@ -926,6 +931,16 @@ function renderModelSuggestions(result) {
     // duplicate check exactly as if they had typed it.
     chip.addEventListener('click', () => {
       document.getElementById('wiz-model').value = c.model;
+      if (typeof c.label === 'string' && c.label.trim()) {
+        document.getElementById('wiz-name').value = c.label.trim();
+      }
+      for (const field of ['variant', 'description']) {
+        document.getElementById(`wiz-${field}`).value =
+          typeof c[field] === 'string' ? c[field] : '';
+      }
+      const imageUrl = safeHttpUrl(c.image_url);
+      document.getElementById('wiz-image-url').value =
+        imageUrl && imageUrl.startsWith('https://') ? imageUrl : '';
       document.getElementById('wiz-model').dispatchEvent(new Event('blur'));
     });
     box.appendChild(chip);
@@ -1086,7 +1101,9 @@ wire('wiz-next', async () => {
     } else if (step === 'optional') {
       const product = await api('/api/products', { method: 'POST', body: {
         name: wizVal('wiz-name'), model: wizVal('wiz-model'), brand: wizVal('wiz-brand') || null,
-        category: wizVal('wiz-category') || 'general', verdict: wizVal('wiz-verdict'),
+        variant: wizVal('wiz-variant') || null, description: wizVal('wiz-description') || null,
+        image_url: wizVal('wiz-image-url') || null, category: wizVal('wiz-category') || 'general',
+        verdict: wizVal('wiz-verdict'),
         notes: wizVal('wiz-notes') || null,
       }});
       wiz.productId = product.id;

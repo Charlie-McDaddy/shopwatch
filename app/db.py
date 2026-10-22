@@ -70,6 +70,11 @@ def migrate(path: Path | None = None) -> list[str]:
             if sql_file.name in done:
                 continue
             conn.executescript(sql_file.read_text())
+            violation = conn.execute("PRAGMA foreign_key_check").fetchone()
+            if violation:
+                raise sqlite3.IntegrityError(
+                    f"foreign-key violation after {sql_file.name}: {tuple(violation)}"
+                )
             conn.execute(
                 "INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)",
                 (sql_file.name, utcnow()),

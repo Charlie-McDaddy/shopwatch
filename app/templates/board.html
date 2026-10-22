@@ -82,6 +82,7 @@
         <label>What is it <input id="wiz-name" placeholder="Samsung Q-Series soundbar"></label>
         <label>Exact model <input id="wiz-model" placeholder="HW-Q930H/XY">
           <small>Used to match imports, so get it exact</small></label>
+        <label>Variant <input id="wiz-variant" placeholder="1 kg, vanilla"></label>
       </div>
       <p id="wiz-model-warning" class="wizard-warning" hidden></p>
       <button type="button" id="wiz-suggest-models" class="btn">Suggest models</button>
@@ -92,6 +93,9 @@
       <p class="wizard-tier">Optional - fill in what you know, skip the rest</p>
       <div class="form-grid">
         <label>Brand <input id="wiz-brand"></label>
+        <label class="wide">Description <textarea id="wiz-description" rows="2"></textarea></label>
+        <label class="wide">Image URL <input id="wiz-image-url" type="url" placeholder="https://…">
+          <small>Optional; use a public HTTPS image address</small></label>
         <label>Category <input id="wiz-category" value="general" list="wiz-cats"></label>
         <label>Worth buying?
           <select id="wiz-verdict"><option>MAYBE</option><option>BUY</option><option>IGNORE</option></select>

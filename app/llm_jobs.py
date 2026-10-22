@@ -13,10 +13,12 @@ module only ever returns suggestions into the wizard's own text field.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
 from .db import utcnow
+from .urls import public_http_url
 
 STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
@@ -102,12 +104,46 @@ def claim_next_queued(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return get_job(conn, int(row["id"]))
 
 
+def _clean_model_suggestions(result: str | None) -> str:
+    try:
+        data = json.loads(result or "")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("model suggestions must be valid JSON") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
+        raise ValueError("model suggestions must include a candidates list")
+    candidates = []
+    for item in data["candidates"][:5]:
+        if not isinstance(item, dict) or not isinstance(item.get("model"), str):
+            continue
+        model = item["model"].strip()
+        if not model or len(model) > 200:
+            continue
+        candidate = {"model": model, "label": model}
+        for field, limit in (("label", 300), ("variant", 200), ("description", 5000)):
+            value = item.get(field)
+            if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
+                candidate[field] = value.strip()
+        for field, require_https in (("source", False), ("image_url", True)):
+            value = item.get(field)
+            if not isinstance(value, str) or not public_http_url(value):
+                continue
+            if require_https and value[:8].lower() != "https://":
+                continue
+            candidate[field] = value
+        candidates.append(candidate)
+    note = data.get("note")
+    return json.dumps({"candidates": candidates, "note": note if isinstance(note, str) else None})
+
+
 def complete_job(
     conn: sqlite3.Connection, job_id: int, status: str,
     result: str | None = None, error: str | None = None,
 ) -> None:
     if status not in ("DONE", "FAILED"):
         raise ValueError("a job can only complete as DONE or FAILED")
+    job = conn.execute("SELECT kind FROM llm_jobs WHERE id = ?", (job_id,)).fetchone()
+    if status == "DONE" and job and job["kind"] == "model_suggestion":
+        result = _clean_model_suggestions(result)
     conn.execute(
         "UPDATE llm_jobs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?",
         (status, result, error, utcnow(), job_id),

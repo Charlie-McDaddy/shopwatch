@@ -220,3 +220,21 @@ def test_resolve_job_kind_raises_loudly_for_an_unrecognised_kind():
     wrong prompt and parser - see resolve_job_kind's own docstring."""
     with pytest.raises(ValueError, match="unrecognised job kind"):
         llm_helper.resolve_job_kind("a_future_kind_this_copy_predates")
+
+
+def test_model_suggestion_parser_keeps_available_card_metadata():
+    reply = ('{"candidates":[{"model":"WHEY-9","label":"Whey","source":"https://shop.example/item",'
+             '"variant":"Vanilla 1 kg","description":"Vanilla whey","image_url":"https://img.example/whey.jpg"}],'
+             '"note":null}')
+    result = llm_helper.parse_reply(reply)
+    assert result["candidates"][0]["variant"] == "Vanilla 1 kg"
+    assert result["candidates"][0]["description"] == "Vanilla whey"
+    assert result["candidates"][0]["image_url"] == "https://img.example/whey.jpg"
+
+
+def test_web_model_prompt_requests_only_source_supported_card_metadata():
+    prompt = llm_helper.build_web_prompt("vanilla protein powder")
+    assert '"variant"' in prompt
+    assert '"description"' in prompt
+    assert '"image_url"' in prompt
+    assert "only when supported by that source" in prompt
