@@ -716,28 +716,107 @@ coverage are not guaranteed, and this is not an all-time price record.
 
 ## Product and retailer research
 
-Model suggestions, retailer discovery and price research all start in the GUI and run
-through the host research runner. Model suggestions and retailer discovery use the
-host's existing Claude Code CLI session with WebSearch; retailer discovery can also use
-the self-hosted Firecrawl service. Retailer price research uses WebSearch/WebFetch. The
-app does not call a paid AI/search API or fall back to paid OpenRouter credits.
+Model suggestions, retailer discovery and price research start in the GUI and run
+through `deploy/research-runner.py` on the always-on host. The runner supports the
+original Claude Code subscription-token connection and an explicit local CLIProxyAPI
+connection. Independent supported retailer checks do not depend on either connection.
+No separate desktop helper is required.
 
-For Claude jobs, the runner requires `CLAUDE_CODE_OAUTH_TOKEN`, clears API-key and
-cloud-provider routing variables, and starts Claude Code with an isolated configuration
-and those billing overrides disabled. It fails the job when the subscription token is
-missing instead of falling back to API credentials.
+### WSL with the existing CLIProxyAPI service
 
-Before relying on unattended research, verify that `CLAUDE_CODE_OAUTH_TOKEN` is
-configured in the host runner environment without printing its value, then submit one
-GUI search and confirm that it completes with source links. The token's presence alone
-does not prove that it remains valid or that the account permits unattended WebSearch.
+This fork runs on an always-on WSL host. **opti is the original owner's OptiPlex**, not
+a machine this fork needs to reach. The opti deployment section below describes the
+inherited setup; use the local services here for WSL.
 
-The web container never receives the CLI credential. A subscription alone does not
-prove that the host session has unattended access or WebSearch enabled, so the host
-operator must verify that access before relying on research. A failed or expired session
-appears as a failed job with a reconnect-and-retry instruction; independent direct
-retailer checks continue. Model candidates include source links and remain suggestions:
-clicking one only fills the model field for the user to verify.
+The existing local CLIProxyAPI service listens on `127.0.0.1:8317`. Its `pi-luna` alias
+maps to the Codex OAuth route for `gpt-6-luna`. During verification in October 2026, its configuration
+contained Claude, Codex and Antigravity OAuth accounts and no paid API upstreams.
+The [proxy's OAuth connection](https://help.router-for.me/configuration/provider/codex)
+is separate from its optional
+[OpenRouter/API-key upstreams](https://help.router-for.me/configuration/provider/openai-compatibility).
+Keep the selected route OAuth-only; do not add paid upstreams, credits or fallback to
+it. A model catalogue entry or stored token alone does not prove usable access.
+
+Put these settings in `~/.config/shopwatch/research.env` (create the directory first,
+set the file's permissions to `0600`, and keep it out of Git):
+
+```dotenv
+SHOPWATCH_RESEARCH_BACKEND=cliproxy
+SHOPWATCH_CLIPROXY_MODEL=pi-luna
+SHOPWATCH_CLIPROXY_API_KEY=<the existing local proxy client key>
+```
+
+The client key authenticates to the local proxy; it is not a provider API key. Provider
+OAuth credentials stay in CLIProxyAPI. The web app does not need this environment
+file. The proxy URL is deliberately fixed to loopback, redirects are rejected, and
+there is no automatic switch to the Claude CLI, another model or OpenRouter on failure.
+Search responses must contain a completed `web_search_call` and completed text output;
+otherwise the job fails with reconnect-and-retry instructions. URL-only page research
+is not supported by this proxy path: use a supported direct retailer check or update
+that listing manually. Search findings retain the existing provenance and confirmation
+rules and do not establish a confirmed current delivered price.
+Initial discovery, weekly rediscovery and Find more shops use the selected proxy
+connection too; they do not require Firecrawl when this backend is selected.
+
+For a checkout at `~/coding/shopwatch`, install the two native user services (adjust
+the paths in the unit files if the checkout is elsewhere):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/shopwatch.user.service ~/.config/systemd/user/shopwatch.service
+cp deploy/shopwatch-research-runner.user.service ~/.config/systemd/user/shopwatch-research-runner.service
+systemctl --user daemon-reload
+systemctl --user enable --now shopwatch.service shopwatch-research-runner.service
+```
+
+Open `http://localhost:8477/`. The app binds to loopback; the research runner polls
+every 10 seconds. The units use the existing `data/shopwatch.db` and never source the
+original owner's `/srv/prod/career/runner.env`. User services require a running WSL
+instance and user manager; if they must survive logout, enable lingering for the host
+user. They do not prevent Windows shutdown or WSL termination.
+
+To retry, reconnect the selected Codex OAuth account in the local proxy and submit a
+fresh GUI search. To stop research without losing history, run
+`systemctl --user stop shopwatch-research-runner.service`. Service failures can be
+inspected with `journalctl --user -u shopwatch-research-runner.service`; provider
+response bodies and client keys are not written into job errors.
+
+### Verified research flow
+
+In bounded checks on 21 and 22 October 2026, this WSL host started Shopwatch on loopback
+with a temporary database, created model-suggestion job `1` through the same HTTP
+endpoint used by the GUI, and ran the real host runner through CLIProxyAPI. The job
+transitioned from `QUEUED` to `DONE` and returned exact model `HW-Q930H/XY` with this
+[Samsung Australia source](https://www.samsung.com/au/audio-devices/soundbar/q930h-black-hw-q930h-xy/).
+A separate proxy check recorded a completed `web_search_call`; the source page was
+also opened and its exact model confirmed. The temporary server and database were
+removed afterwards. A second temporary HTTP product creation triggered automatic
+retailer discovery through the same proxy and completed with four exact-product
+listing URLs (Kogan, Shop Valet, Bing Lee and Appliances Online). Homepage-only results
+were retained as suggestions without automatically attaching a product listing.
+This verifies the connection and HTTP research flow, not a
+permanently enabled deployment or every provider's search capability.
+
+Controlled HTTP tests cover queued/running/completed research, expired access, missing
+configuration and failed search for both backends. They verify that no paid fallback
+is invoked, credentials are absent from results/logs, and supported retailer checks
+continue after research fails. Model candidates remain suggestions for the user to
+verify. Free/subscription access still depends on provider quotas and future changes;
+recheck the OAuth-only route if proxy routing is changed.
+
+### Original Claude Code connection
+
+With `SHOPWATCH_RESEARCH_BACKEND=claude` (the default), the runner requires
+`CLAUDE_CODE_OAUTH_TOKEN`, clears API-key/cloud-provider routing variables and runs
+Claude Code in an isolated configuration. A missing token fails instead of using API
+credentials. See Claude Code's
+[subscription authentication](https://code.claude.com/docs/en/authentication) and
+[programmatic CLI usage](https://code.claude.com/docs/en/headless) documentation.
+Do not use `--bare`: that mode does not read subscription OAuth credentials.
+Use `claude setup-token` on the host to create or replace the token. Never paste it
+into issues, job results or logs. Separately charged extra usage must be disabled in
+the account; the runner cannot enforce account spending settings. This connection
+was not live-tested on the WSL host because no runner token was configured.
 
 ## Deployed on opti
 

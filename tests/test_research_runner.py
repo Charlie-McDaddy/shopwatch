@@ -429,8 +429,90 @@ def test_missing_subscription_token_fails_without_running_the_cli(monkeypatch):
 
     monkeypatch.setattr(research_runner.subprocess, "run", fake_run)
     with pytest.raises(research_runner.SubscriptionAccessUnavailable, match="OAuth token"):
-        research_runner._run_subscription_claude(["claude", "-p"], "query", 5)
+        research_runner._run_research(["claude", "-p"], "query", 5)
     assert not invoked
+
+
+@pytest.mark.parametrize("search_status", ["completed", "failed", "missing"])
+def test_cliproxy_research_requires_completed_web_search(monkeypatch, search_status):
+    monkeypatch.setenv("SHOPWATCH_RESEARCH_BACKEND", "cliproxy")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_API_KEY", "local-client-key")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_MODEL", "pi-luna")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+    reply = '{"candidates":[],"note":"No matching model found."}'
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            output = [{"type": "message", "content": [{"type": "output_text", "text": reply}]}]
+            if search_status != "missing":
+                output.insert(0, {"type": "web_search_call", "status": search_status})
+            return {"status": "completed", "output": output}
+
+    def post(url, **kwargs):
+        assert url == "http://127.0.0.1:8317/v1/responses"
+        assert kwargs["headers"]["Authorization"] == "Bearer local-client-key"
+        assert kwargs["json"]["model"] == "pi-luna"
+        assert kwargs["json"]["tools"] == [{"type": "web_search"}]
+        assert kwargs["allow_redirects"] is False
+        return Response()
+
+    monkeypatch.setattr(research_runner.requests, "post", post)
+    monkeypatch.setattr(research_runner.subprocess, "run", lambda *a, **kw: pytest.fail(
+        "proxy research must not fall back to a CLI or paid API"
+    ))
+    args = ["claude", "-p", "--allowedTools", "WebSearch"]
+    if search_status == "completed":
+        assert research_runner._run_research(args, "query", 5).stdout == reply
+    else:
+        with pytest.raises(research_runner.SubscriptionAccessUnavailable, match="search"):
+            research_runner._run_research(args, "query", 5)
+
+
+def test_cliproxy_discovery_preserves_exact_page_evidence_without_firecrawl(monkeypatch):
+    monkeypatch.setenv("SHOPWATCH_RESEARCH_BACKEND", "cliproxy")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_API_KEY", "local-client-key")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_MODEL", "pi-luna")
+    retailers = [{"name": "Shop", "homepage": "https://shop.example",
+                  "source_url": "https://shop.example/model-1",
+                  "source_title": "MODEL-1 exact product"}]
+    completed = []
+
+    def post(url, **kwargs):
+        from types import SimpleNamespace
+
+        if url == "http://127.0.0.1:8317/v1/responses":
+            return SimpleNamespace(status_code=200, json=lambda: {
+                "status": "completed", "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {"type": "message", "content": [{"type": "output_text",
+                        "text": json.dumps({"retailers": retailers, "note": None})}]},
+                ],
+            })
+        assert url == "http://shopwatch/api/retailer-search-jobs/42/complete"
+        completed.append(kwargs["json"])
+
+    monkeypatch.setattr(research_runner.requests, "post", post)
+    research_runner.process_retailer_search_job("http://shopwatch", "http://firecrawl", {
+        "id": 42, "query": json.dumps({"product_name": "Widget", "model": "MODEL-1"}),
+    })
+    assert completed[0]["status"] == "DONE"
+    assert json.loads(completed[0]["result"])["retailers"] == retailers
+
+
+def test_cliproxy_does_not_search_instead_of_reading_a_specific_url(monkeypatch):
+    monkeypatch.setenv("SHOPWATCH_RESEARCH_BACKEND", "cliproxy")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_API_KEY", "local-client-key")
+    monkeypatch.setenv("SHOPWATCH_CLIPROXY_MODEL", "pi-luna")
+    monkeypatch.setattr(research_runner.requests, "post", lambda *a, **kw: pytest.fail(
+        "URL-only research must not send a substitute search"
+    ))
+    with pytest.raises(research_runner.RunnerError, match="URL-only"):
+        research_runner.research_one_retailer(
+            "http://shopwatch", "claude", "Widget", "MODEL-1", "Shop", None,
+            "https://shop.example/widget",
+        )
 
 
 def test_retailer_research_does_not_return_cli_stderr_to_the_gui(monkeypatch):

@@ -957,7 +957,7 @@ wire('wiz-suggest-models', async () => {
       queuedText: 'Queued for the server research runner...',
       runningText: 'Searching for sourced model suggestions...',
       notRunningHint: 'the server research runner has not picked up the job yet. Retry '
-        + 'in a moment or reconnect the Claude Code session on the research host.' },
+        + 'in a moment or reconnect the configured research connection.' },
     onResult: renderModelSuggestions,
     onError: err => `Could not get suggestions: ${err.message}`,
   });
@@ -1023,7 +1023,7 @@ function wireDiscoveryButtons({ llmBtnId, webBtnId, boxId, getPicker, getName, g
         queuedText: 'Queued for the server research runner...',
         runningText: 'Searching for other Australian retailers...',
         notRunningHint: 'the server research runner has not picked up the job yet. Retry '
-          + 'in a moment or reconnect the Claude Code session on the research host.' },
+          + 'in a moment or reconnect the configured research connection.' },
       onResult: (result, box) => { if (!isStale(generation)) picker.renderDiscovered(result, box); },
       onError: err => `Could not ask the LLM for retailers: ${err.message}`,
     });

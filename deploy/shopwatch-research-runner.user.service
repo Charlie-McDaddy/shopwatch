@@ -1,0 +1,13 @@
+[Unit]
+Description=Shopwatch subscription research runner
+Requires=shopwatch.service
+After=shopwatch.service
+
+[Service]
+WorkingDirectory=%h/coding/shopwatch
+EnvironmentFile=%h/.config/shopwatch/research.env
+ExecStart=%h/coding/shopwatch/.venv/bin/python deploy/research-runner.py --base-url http://127.0.0.1:8477 --interval 10
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
