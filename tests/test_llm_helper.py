@@ -66,6 +66,16 @@ def test_a_candidate_missing_a_model_is_dropped_not_kept_blank():
     assert result["candidates"] == [{"model": "REAL-1", "label": "REAL-1"}]
 
 
+def test_a_sourced_product_without_a_model_is_kept():
+    result = llm_helper.parse_web_reply(
+        '{"candidates": [{"label": "Greek yoghurt", "model": null,'
+        ' "source": "https://shop.example/yoghurt"}]}'
+    )
+    assert result["candidates"] == [{
+        "label": "Greek yoghurt", "model": "", "source": "https://shop.example/yoghurt",
+    }]
+
+
 def test_more_than_five_candidates_is_truncated():
     many = [{"model": f"M{i}", "label": f"M{i}"} for i in range(9)]
     reply = f'{{"candidates": {many!r}, "note": null}}'.replace("'", '"')

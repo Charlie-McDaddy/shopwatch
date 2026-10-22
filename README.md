@@ -14,6 +14,13 @@ A self-hosted shopping comparison and price-watch board for a homelab. One produ
 retailer listings, ranked by **delivered price** rather than headline price, with per-field
 provenance so hand-confirmed values are never clobbered by an automated refresh.
 
+Model numbers are optional. Products without one are identified by their name and
+variant, so groceries and other unnumbered products can have separate watchlist cards.
+Search can return sourced products without inventing model numbers. Their shop links
+and prices require manual confirmation; exact-model scraping and archive matching
+remain unavailable until a model is supplied. Snapshot export/import preserves these
+cards; price findings without a model must include their explicit product ID.
+
 Built to replace a single-file HTML comparison board. It is a research tool, not a shop.
 
 **Download it and run your own copy** - see [Deploy with Docker](#deploy-with-docker). The

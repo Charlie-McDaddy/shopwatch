@@ -505,7 +505,9 @@ def api_products(include_archived: bool = False, status: str | None = None) -> A
 
 
 @app.get("/api/products/check-model")
-def api_check_model(model: str = Query(...), variant: str | None = Query(None)) -> Any:
+def api_check_model(
+    model: str = Query(""), variant: str | None = Query(None), name: str | None = Query(None),
+) -> Any:
     """Deterministic model-confirmation check for the wizard.
 
     Free and instant: catches a typo'd duplicate before the wizard ever reaches its
@@ -514,10 +516,12 @@ def api_check_model(model: str = Query(...), variant: str | None = Query(None)) 
     punctuation and case are normalised (store.normalise_model).
     """
     with session() as conn:
-        existing = (
-            store.product_by_model(conn, model, variant)
-            if variant is not None else store.product_by_model(conn, model)
-        )
+        if name is not None:
+            existing = store.product_by_identity(conn, model, name, variant)
+        elif variant is not None:
+            existing = store.product_by_model(conn, model, variant)
+        else:
+            existing = store.product_by_model(conn, model)
     return {
         "normalised": store.normalise_model(model),
         "duplicate_of": (
@@ -638,11 +642,12 @@ def api_remove_product_group(product_id: int) -> Any:
 @app.post("/api/products", status_code=201)
 def api_create_product(payload: dict = Body(...)) -> Any:
     with session() as conn:
-        if payload.get("model") and store.product_by_model(
-            conn, payload["model"], payload.get("variant")
+        if store.product_by_identity(
+            conn, payload.get("model") if isinstance(payload.get("model"), str) else None,
+            payload.get("name"), payload.get("variant")
         ):
             raise HTTPException(
-                409, "this exact product model and variant are already on the watchlist"
+                409, "this product and variant are already on the watchlist"
             )
         try:
             product_id = store.create_product(conn, payload)
@@ -910,7 +915,7 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
 
         scraped = False
         check_error = None
-        if adapter_cls is not None:
+        if adapter_cls is not None and product["model"]:
             try:
                 observation = adapter_cls().check(url, expected_model=product["model"])
             except retailers.FetchError as exc:
@@ -949,7 +954,7 @@ def api_create_listing_from_url(product_id: int, payload: dict = Body(...)) -> A
                     scraped = not mismatch
 
         research_job = None
-        if not scraped and not url_intake.is_marketplace_url(url):
+        if not scraped and product["model"] and not url_intake.is_marketplace_url(url):
             try:
                 job_id = research.create_job(
                     conn, product_id, [retailer["id"]], urls={retailer["id"]: url}

@@ -65,8 +65,8 @@ def import_finding(
     """Apply one normalised finding. Returns a per-finding report."""
     model = finding.get("model") or finding.get("model_number")
     retailer_name = finding.get("retailer")
-    if not model:
-        raise ImportError_("finding has no model")
+    if not model and not finding.get("product_id"):
+        raise ImportError_("finding requires model or product_id")
     if not retailer_name:
         raise ImportError_("finding has no retailer")
     if "variant" in finding and finding["variant"] is not None and not isinstance(
@@ -74,7 +74,20 @@ def import_finding(
     ):
         raise ImportError_("finding variant must be a string")
 
-    if "variant" in finding:
+    if finding.get("product_id") is not None:
+        if (isinstance(finding["product_id"], bool)
+                or not isinstance(finding["product_id"], int) or finding["product_id"] <= 0):
+            raise ImportError_("product_id must be a positive integer")
+        product = store.get_product(conn, finding["product_id"])
+        if product is None:
+            raise ImportError_("no product matches product_id")
+        if model and store.normalise_model(model) != store.normalise_model(product["model"]):
+            raise ImportError_("finding model does not match product_id")
+        if "variant" in finding and store.normalise_variant(finding["variant"]) != (
+            store.normalise_variant(product["variant"])
+        ):
+            raise ImportError_("finding variant does not match product_id")
+    elif "variant" in finding:
         product = store.product_by_model(conn, model, finding.get("variant"))
     else:
         matches = store.products_by_model(conn, model)
@@ -307,7 +320,11 @@ def import_snapshot(conn: sqlite3.Connection, data: Mapping[str, Any]) -> dict[s
             report["errors"].append(f"product {snap.get('id')}: {exc}")
             continue
         model = snap.get("model", "")
-        if "variant" in snap:
+        if not model:
+            existing = store.product_by_identity(
+                conn, model, snap.get("name"), snap.get("variant")
+            )
+        elif "variant" in snap:
             existing = store.product_by_model(conn, model, snap.get("variant"))
         else:
             matches = store.products_by_model(conn, model)

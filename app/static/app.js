@@ -427,7 +427,7 @@ async function pollSellerDiscovery(jobId) {
             row.appendChild(source);
             if (candidate.source_title) row.append(` — ${candidate.source_title}`);
           } else {
-            row.textContent = `${candidate.name} (needs review; no exact-model page found)`;
+            row.textContent = `${candidate.name} (needs review; no confirmed product page found)`;
           }
           if (candidate.needs_review) row.append(' (needs review; add the exact marketplace seller using Add from a URL)');
           if (candidate.homepage) {
@@ -848,22 +848,23 @@ wire('btn-empty-cta', () => document.getElementById('btn-new-product').click());
 
 async function wizCheckProductIdentity() {
   const model = wizVal('wiz-model'), variant = wizVal('wiz-variant');
+  const name = wizVal('wiz-name');
   const warning = document.getElementById('wiz-model-warning');
-  if (!model) { warning.hidden = true; return; }
+  if (!name && !model) { warning.hidden = true; return; }
   try {
-    const query = new URLSearchParams({ model, variant });
+    const query = new URLSearchParams({ model, variant, name });
     const result = await api(`/api/products/check-model?${query}`);
     if (result.duplicate_of) {
       warning.hidden = false;
-      warning.textContent = `This exact model and variant are already watched: `
-        + `"${result.duplicate_of.name}" (${result.duplicate_of.model}`
-        + `${result.duplicate_of.variant ? `, ${result.duplicate_of.variant}` : ''}).`;
+      warning.textContent = `This product and variant are already watched: "${result.duplicate_of.name}"`
+        + `${result.duplicate_of.variant ? ` (${result.duplicate_of.variant})` : ''}.`;
     } else {
       warning.hidden = true;
     }
   } catch { /* the deterministic check is a courtesy, never a blocker */ }
 }
 document.getElementById('wiz-model')?.addEventListener('blur', wizCheckProductIdentity);
+document.getElementById('wiz-name')?.addEventListener('blur', wizCheckProductIdentity);
 document.getElementById('wiz-variant')?.addEventListener('blur', wizCheckProductIdentity);
 
 /* Polls a queued job row (llm_jobs or retailer_search_jobs - same {status, result,
@@ -924,7 +925,7 @@ function renderModelSuggestions(result) {
     return;
   }
   for (const c of result.candidates) {
-    const chip = el('button', `${c.label} (${c.model})`, 'btn wizard-suggest-chip');
+    const chip = el('button', c.model ? `${c.label} (${c.model})` : c.label, 'btn wizard-suggest-chip');
     chip.type = 'button';
     // A candidate is a suggestion to VERIFY, never applied silently: clicking one only
     // fills the field a person still submits themselves, and re-runs the existing
@@ -962,7 +963,7 @@ wire('wiz-suggest-models', async () => {
   await wizRunJob({
     btn: document.getElementById('wiz-suggest-models'),
     box: document.getElementById('wiz-model-suggestions'),
-    busyText: 'Asking...', idleText: 'Suggest models',
+    busyText: 'Searching...', idleText: 'Find products',
     waitingText: 'Waiting for the server research runner...',
     create: () => ({
       createUrl: '/api/llm-jobs', body: { query },
@@ -970,7 +971,7 @@ wire('wiz-suggest-models', async () => {
     }),
     pollOpts: { intervalMs: 3000, timeoutMs: 240000,
       queuedText: 'Queued for the server research runner...',
-      runningText: 'Searching for sourced model suggestions...',
+      runningText: 'Searching for sourced product suggestions...',
       notRunningHint: 'the server research runner has not picked up the job yet. Retry '
         + 'in a moment or reconnect the configured research connection.' },
     onResult: renderModelSuggestions,
@@ -1094,8 +1095,8 @@ wire('wiz-next', async () => {
   const step = WIZ_STEPS[wiz.index];
   try {
     if (step === 'basics') {
-      if (!wizVal('wiz-name') || !wizVal('wiz-model')) {
-        toast('Name and model are both required.', 'bad');
+      if (!wizVal('wiz-name')) {
+        toast('Product name is required.', 'bad');
         return;
       }
     } else if (step === 'optional') {
@@ -2360,7 +2361,7 @@ wire('btn-add-candidate', async () => {
     for (const p of products.filter(p => !p.group_id)) {
       const opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = `${p.name} (${p.model})`;
+      opt.textContent = p.model ? `${p.name} (${p.model})` : p.name;
       select.appendChild(opt);
     }
   } catch (err) { toast(`Could not load products: ${err.message}`, 'bad'); }
