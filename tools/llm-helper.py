@@ -71,7 +71,10 @@ Be short and honest:
 Return ONLY a JSON object, no prose, no code fence, matching this shape:
 {{
   "candidates": [
-    {{"model": "exact model number or SKU", "label": "short human name, e.g. 'Dreame A2 (2025)'"}}
+    {{"model": "exact model number or SKU", "label": "sourced product name",
+      "variant": "exact size/flavour/variant, or null if unknown",
+      "description": "short sourced description, or null if unknown",
+      "image_url": "direct public HTTPS product image URL, or null if unavailable"}}
   ],
   "note": "one short sentence, or null - a confidence/recency caveat, not a candidate repeat"
 }}
@@ -88,7 +91,8 @@ def build_web_prompt(query: str) -> str:
 
 For this request, use WebSearch to find current, sourced product candidates. Return the
 same JSON shape, with an additional "source" field on each candidate containing the
-HTTP(S) URL that supports that exact model. Do not invent a source URL. If no reliable
+HTTP(S) URL that supports that exact model. Include variant, description, and image_url
+only when supported by that source. Do not invent a source or image URL. If no reliable
 candidate can be sourced, return an empty candidates list and explain why in note.
 """
 
@@ -184,6 +188,10 @@ def parse_reply(raw: str) -> dict[str, Any]:
         if not model:
             continue
         candidate = {"model": model, "label": str(item.get("label") or model).strip()}
+        for field, limit in (("variant", 200), ("description", 5000), ("image_url", 2048)):
+            value = item.get(field)
+            if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
+                candidate[field] = value.strip()
         source = item.get("source")
         if isinstance(source, str):
             source = source.strip()

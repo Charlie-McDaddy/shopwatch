@@ -230,6 +230,9 @@ footer.site .build { font-family: var(--mono); }
   font-family: var(--mono); font-size: 12.5px; color: var(--muted);
 }
 .product-head .spacer { flex: 1; }
+.product-identity { display: flex; align-items: flex-start; gap: 14px; padding: 0 20px 12px; }
+.product-identity img { width: 88px; height: 88px; object-fit: contain; }
+.product-identity p { margin: 0 0 6px; }
 
 /* The answer, before any data. Sized so it is read first. */
 .verdict {

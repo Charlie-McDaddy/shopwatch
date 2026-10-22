@@ -1,0 +1,10 @@
+[Unit]
+Description=Run due Shopwatch household price checks
+Requires=shopwatch.service
+After=shopwatch.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/coding/shopwatch
+EnvironmentFile=-%h/.config/shopwatch/app.env
+ExecStart=%h/coding/shopwatch/.venv/bin/python -m app.schedules
