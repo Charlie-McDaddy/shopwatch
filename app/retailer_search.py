@@ -280,7 +280,7 @@ def _retain_discovered_listings(
             continue
         if homepage and not public_http_url(homepage):
             homepage = ""
-        # shortcut: model evidence alone cannot safely distinguish product variants.
+        # shortcut: variants need review, automate when reliable variant evidence is available.
         exact_page = bool(source_url and public_http_url(source_url)
                           and matches_exact_model(model, source_title))
         domain = bare_domain(homepage) if homepage else None

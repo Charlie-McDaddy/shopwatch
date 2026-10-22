@@ -8,6 +8,8 @@ not a claim that unattended production operation is enabled. Parent spec: #1.
 - Baseline automated checks: 680 tests passed; Ruff passed. The suite includes
   HTTP/rendered flows, migrations, snapshots, location quote invalidation, scheduler
   recovery, alerts, purchases, archive suppression and failed-provider isolation.
+- Final integration checks: 697 tests passed, Ruff passed, and all three deployment
+  shell checks passed (installation, rebuild triggering and service liveness).
 - A disposable loopback server and database accepted a real model-suggestion HTTP
   job as `QUEUED`. The host runner completed it as `DONE` using the existing
   CLIProxyAPI `pi-luna` OAuth alias, returning `HW-Q930H/XY` and its
@@ -24,6 +26,13 @@ not a claim that unattended production operation is enabled. Parent spec: #1.
   retain last good values, provenance and manual locks.
 - Native WSL app, research-runner, scheduler service and timer units passed
   `systemd-analyze --user verify`. This validates unit configuration, not execution.
+- A disposable Chromium smoke passed keyboard search/candidate selection, sourced
+  links, candidate name/metadata propagation, clearing absent metadata on candidate
+  switches, actual image load, reload persistence, duplicate rejection and distinct
+  same-model variants. It also checked $16/kg on a confirmed 1.5 kg offer, buying
+  advice, persisted postcode/radius, unknown pickup context, archive/restore and
+  rejection of a private image URL, with no JavaScript errors. Search/research
+  completion and image delivery were controlled; no live notifications were sent.
 
 ## Marketplace capability
 
