@@ -4,6 +4,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=%h/coding/shopwatch
+EnvironmentFile=-%h/.config/shopwatch/app.env
 ExecStart=%h/coding/shopwatch/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8477
 Restart=on-failure
 
