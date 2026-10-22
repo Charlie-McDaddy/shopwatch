@@ -510,14 +510,18 @@ def research_one_retailer(
     """
     if url:
         prompt = PROMPT_URL.format(
-            product_name=product_name, model=model, retailer_name=retailer_name, url=url,
+            product_name=product_name,
+            model=model or "Not provided; match the product name and variant",
+            retailer_name=retailer_name, url=url,
             variant_hint=f"Variant: {variant}\n" if variant else "",
         )
         allowed_tools = "WebFetch"
     else:
         hint = f" ({homepage})" if homepage else ""
         prompt = PROMPT.format(
-            product_name=product_name, model=model, retailer_name=retailer_name,
+            product_name=product_name,
+            model=model or "Not provided; match the product name and variant",
+            retailer_name=retailer_name,
             homepage_hint=hint, variant_hint=f"Variant: {variant}\n" if variant else "",
         )
         allowed_tools = "WebSearch,WebFetch"
@@ -568,7 +572,8 @@ def research_historical_low(
     found") or raises RunnerError for a subprocess-level failure (crash, timeout,
     missing binary, non-zero exit)."""
     prompt = HISTORICAL_LOW_PROMPT.format(
-        product_name=product_name, model=model,
+        product_name=product_name,
+        model=model or "Not provided; match the product name and variant",
         variant_hint=f"Variant: {variant}\n" if variant else "",
         excluded_section=_excluded_retailers_section(excluded_names),
     )
@@ -679,6 +684,7 @@ def process_job(base_url: str, claude_bin: str, job: dict[str, Any]) -> None:
         imported = requests.post(
             f"{base_url}/api/import",
             json={"findings": [{
+                "product_id": job["product_id"],
                 "model": product["model"], "variant": product.get("variant"),
                 "retailer": retailer_name, "price": found["price"], "stock": found.get("stock"),
                 "url": found.get("url"), "source": "research-runner",
@@ -877,7 +883,7 @@ def discover_retailers(
         title = item.get("title") or ""
         domain = _bare_domain(url)
         if (not domain or domain in seen_domains or domain in excluded_domains
-                or not _safe_http_url(url) or not _contains_exact_model(model, title)):
+                or not _safe_http_url(url) or (model and not _contains_exact_model(model, title))):
             continue
         seen_domains.add(domain)
         name = _name_from_search_result(url, title)

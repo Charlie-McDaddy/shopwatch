@@ -1021,3 +1021,4 @@ def test_process_job_passes_the_result_row_url_through(monkeypatch):
     imports = [body for url, body in posted if url == "http://x/api/import"]
     assert len(imports) == 2
     assert all(body["findings"][0]["variant"] == "Vanilla 1 kg" for body in imports)
+    assert all(body["findings"][0]["product_id"] == job["product_id"] for body in imports)

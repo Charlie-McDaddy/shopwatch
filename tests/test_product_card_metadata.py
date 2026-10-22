@@ -215,6 +215,7 @@ def test_pre_metadata_upgrade_preserves_linked_product_data_and_id_high_water(tm
 
     assert migrate(path) == [
         "0030_product_card_metadata.sql", "0031_product_model_variant_identity.sql",
+        "0032_optional_product_model.sql",
     ]
     conn = connect(path)
     try:

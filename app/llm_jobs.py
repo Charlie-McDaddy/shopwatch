@@ -113,10 +113,16 @@ def _clean_model_suggestions(result: str | None) -> str:
         raise ValueError("model suggestions must include a candidates list")
     candidates = []
     for item in data["candidates"][:5]:
-        if not isinstance(item, dict) or not isinstance(item.get("model"), str):
+        if not isinstance(item, dict):
             continue
-        model = item["model"].strip()
-        if not model or len(model) > 200:
+        model = item.get("model") or ""
+        if not isinstance(model, str) or len(model) > 200:
+            continue
+        model = model.strip()
+        if not model and not (
+            isinstance(item.get("label"), str) and item["label"].strip()
+            and public_http_url(item.get("source"))
+        ):
             continue
         candidate = {"model": model, "label": model}
         for field, limit in (("label", 300), ("variant", 200), ("description", 5000)):

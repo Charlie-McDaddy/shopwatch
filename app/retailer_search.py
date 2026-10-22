@@ -281,17 +281,18 @@ def _retain_discovered_listings(
         if homepage and not public_http_url(homepage):
             homepage = ""
         # shortcut: variants need review, automate when reliable variant evidence is available.
-        exact_page = bool(source_url and public_http_url(source_url)
-                          and matches_exact_model(model, source_title))
+        source_page = bool(source_url and public_http_url(source_url) and source_title)
+        exact_page = source_page and matches_exact_model(model, source_title)
+        review_page = source_page and not model
         domain = bare_domain(homepage) if homepage else None
-        marketplace = bool(exact_page and is_marketplace_url(source_url))
-        variant_requires_review = bool(variant)
+        marketplace = bool((exact_page or review_page) and is_marketplace_url(source_url))
+        variant_requires_review = bool(variant) or not model
         if (not marketplace and
                 (name.casefold() in existing_names or (domain and domain in existing_domains))):
             continue
         item = {"name": name, "homepage": homepage or None,
-                "source_url": source_url if exact_page else None,
-                "source_title": source_title[:500] if exact_page else None,
+                "source_url": source_url if exact_page or review_page else None,
+                "source_title": source_title[:500] if exact_page or review_page else None,
                 "needs_review": marketplace or variant_requires_review}
         if exact_page and not marketplace and not variant_requires_review:
             retailer = store.ensure_retailer(conn, name, homepage=homepage or None)

@@ -75,8 +75,8 @@
         <p>
           {% if candidate.source_url %}<a href="{{ candidate.source_url }}" rel="noopener">{{ candidate.name }}</a>
             {% if candidate.source_title %}<span class="muted"> — {{ candidate.source_title }}</span>{% endif %}
-          {% else %}{{ candidate.name }} <span class="muted">(needs review; no exact-model page found)</span>{% endif %}
-          {% if candidate.needs_review %}<span class="muted">(needs review; add the exact marketplace seller using Add from a URL)</span>{% endif %}
+          {% else %}{{ candidate.name }} <span class="muted">(needs review; no confirmed product page found)</span>{% endif %}
+          {% if candidate.needs_review %}<span class="muted">(review the exact product and seller using Add from a URL)</span>{% endif %}
           {% if candidate.homepage %}<span class="muted"> · <a href="{{ candidate.homepage }}" rel="noopener">shop</a></span>{% endif %}
         </p>
       {% else %}<p class="muted">No additional sellers found.</p>{% endfor %}
@@ -407,7 +407,7 @@
   <header>Research historical low</header>
   <div class="body">
     <p class="muted" style="margin:0 0 10px">Asks an AI research pass to look for the
-      lowest price this exact model has ever sold for anywhere, including before it was
+      lowest price this exact product has ever sold for anywhere, including before it was
       added here - price-history trackers, deal forums, cached listings. This is always
       an estimate for you to check: nothing is written to the product until you choose
       "Use this" below and save it yourself.</p>
@@ -426,7 +426,7 @@
   <div class="body">
     <div class="form-grid">
       <label>What is it <input id="ep-name" value="{{ product.name }}"></label>
-      <label>Exact model <input id="ep-model" value="{{ product.model }}"></label>
+      <label>Model (optional) <input id="ep-model" value="{{ product.model }}"></label>
       <label>Brand <input id="ep-brand" value="{{ product.brand or '' }}"></label>
       <label>Category <input id="ep-category" value="{{ product.category }}" list="cat-list"></label>
       <label>Generation <input id="ep-generation" value="{{ product.generation or '' }}"></label>

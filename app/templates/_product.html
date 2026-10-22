@@ -277,7 +277,7 @@
     <div class="checks" style="padding:8px 0">
       {% for aspect, v in l.verification.items() %}
         <span class="c {{ 'ok' if v.status in ['VERIFIED','LIVE'] else ('bad' if v.status == 'FLAGGED' else ('hand' if v.status == 'MANUAL' else '')) }}"
-              title="{{ v.note or v.status }}">{{ aspect }}:
+              title="{{ v.note or v.status }}">{{ 'product identity' if aspect == 'model' and not product.model else aspect }}:
           {{- ' confirmed' if v.status == 'VERIFIED' else (' scraped' if v.status == 'LIVE' else (' by hand' if v.status == 'MANUAL' else (' flagged' if v.status == 'FLAGGED' else ' unchecked'))) }}</span>
       {% endfor %}
     </div>
@@ -330,11 +330,14 @@
   <div class="product-head">
     <div class="row">
       <h2>{% if linked %}<a href="/products/{{ product.id }}">{{ product.name }}</a>{% else %}{{ product.name }}{% endif %}</h2>
-      <span class="model">{{ product.model }}</span>
+      {% if product.model %}<span class="model">{{ product.model }}</span>{% endif %}
       <span class="spacer"></span>
       {% if caller is defined %}{{ caller() }}{% endif %}
     </div>
   </div>
+  {% if not product.model %}
+  <p class="small muted">No model number. Confirm the exact product and variant manually; automatic price checks are unavailable.</p>
+  {% endif %}
   {% if product.image_url or product.description or product.variant %}
   <div class="product-identity">
     {% if product.image_url|safe_url %}<img src="{{ product.image_url|safe_url }}" alt="{{ product.name }}" loading="lazy">{% endif %}

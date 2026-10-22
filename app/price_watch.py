@@ -66,6 +66,10 @@ def check_listing(
     config: Config,
 ) -> str:
     """Check one listing. Returns 'ok', 'unresolved', 'skipped' or 'error'."""
+    if not product["model"]:
+        _record(conn, run_id, listing["id"], "skipped",
+                "No model number; confirm this product and price manually.")
+        return "skipped"
     adapter = retailers.get_adapter(listing["retailer_adapter"])
     from . import url_intake
     domain = url_intake.bare_domain(listing["url"] or "")

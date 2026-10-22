@@ -52,18 +52,17 @@ CODEX_EXEC_ARGS = ["exec", "--skip-git-repo-check"]
 #: person watching the terminal deserves a clear timeout rather than an indefinite hang.
 CALL_TIMEOUT_SECONDS = 60
 
-PROMPT_TEMPLATE = """You are helping someone fill in the exact model number for a
-product on a personal price-watching tool. They have given a rough description. This
-field is later used to match future price imports against, so it must be an exact, real
-model number or SKU - never one that merely sounds plausible for the brand/category.
+PROMPT_TEMPLATE = """You are helping someone find an exact product for a personal
+price-watching tool from a rough description. Include a real model number or SKU when
+the product has one. Otherwise return null; never invent a model number.
 
 Rough description: {query}
 
 Be short and honest:
 - Return 0 to 5 candidates. Fewer, or zero, is the correct answer when you are not
-  genuinely confident real models exist matching this description. A plausible-looking
+  genuinely confident real products exist matching this description. A plausible-looking
   invented model number is worse than no suggestion at all.
-- Only include a model you have specific, genuine knowledge of - not a guess at the
+- Only include a model number you have specific knowledge of - not a guess at the
   pattern a model number "would" follow for this brand.
 - If the product line is very new, or you are not confident your knowledge of it is
   current, say so in "note" rather than guessing at specific models.
@@ -71,7 +70,8 @@ Be short and honest:
 Return ONLY a JSON object, no prose, no code fence, matching this shape:
 {{
   "candidates": [
-    {{"model": "exact model number or SKU", "label": "sourced product name",
+    {{"model": "exact model number or SKU, or null when the product has none",
+      "label": "sourced product name",
       "variant": "exact size/flavour/variant, or null if unknown",
       "description": "short sourced description, or null if unknown",
       "image_url": "direct public HTTPS product image URL, or null if unavailable"}}
@@ -91,7 +91,9 @@ def build_web_prompt(query: str) -> str:
 
 For this request, use WebSearch to find current, sourced product candidates. Return the
 same JSON shape, with an additional "source" field on each candidate containing the
-HTTP(S) URL that supports that exact model. Include variant, description, and image_url
+HTTP(S) URL that supports that exact product. A model number is optional: return null
+for products without one, and identify them by their sourced name and variant instead.
+Include variant, description, and image_url
 only when supported by that source. Do not invent a source or image URL. If no reliable
 candidate can be sourced, return an empty candidates list and explain why in note.
 """
@@ -185,7 +187,10 @@ def parse_reply(raw: str) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         model = str(item.get("model") or "").strip()
-        if not model:
+        if not model and not (
+            isinstance(item.get("label"), str) and item["label"].strip()
+            and isinstance(item.get("source"), str)
+        ):
             continue
         candidate = {"model": model, "label": str(item.get("label") or model).strip()}
         for field, limit in (("variant", 200), ("description", 5000), ("image_url", 2048)):

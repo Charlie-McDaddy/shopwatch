@@ -272,6 +272,8 @@ _UNSPECIFIED_VARIANT = object()
 
 def products_by_model(conn: sqlite3.Connection, model: str) -> list[sqlite3.Row]:
     target = normalise_model(model)
+    if not target:
+        return []
     return [row for row in conn.execute("SELECT * FROM products")
             if normalise_model(row["model"]) == target]
 
@@ -291,7 +293,20 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
 
 
+def product_by_identity(
+    conn: sqlite3.Connection, model: str | None, name: str, variant: str | None = None,
+) -> sqlite3.Row | None:
+    if model and model.strip():
+        return product_by_model(conn, model, variant)
+    name_key = normalise_variant(name)
+    return next((row for row in conn.execute("SELECT * FROM products WHERE model = ''")
+                 if normalise_variant(row["name"]) == name_key
+                 and normalise_variant(row["variant"]) == normalise_variant(variant)), None)
+
+
 def validate_product_metadata(data: Mapping[str, Any]) -> None:
+    if data.get("model") is not None and not isinstance(data["model"], str):
+        raise ValueError("model must be text")
     for field, limit in (("variant", 200), ("description", 5000), ("image_url", 2048)):
         value = data.get(field)
         if value in (None, ""):
@@ -318,10 +333,9 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
     payload.setdefault("verdict", "MAYBE")
     if not isinstance(payload.get("name"), str) or not payload["name"].strip():
         raise ValueError("name is required")
-    if not isinstance(payload.get("model"), str) or not payload["model"].strip():
-        raise ValueError("model is required")
-    if product_by_model(conn, payload["model"], payload.get("variant")):
-        raise ValueError("this exact product model and variant already exists")
+    payload["model"] = (payload.get("model") or "").strip()
+    if product_by_identity(conn, payload["model"], payload["name"], payload.get("variant")):
+        raise ValueError("this product and variant already exists")
     payload["specs_json"] = json.dumps(data.get("specs") or {})
     payload["components_json"] = json.dumps(data.get("components") or {})
     payload["created_at"] = payload["updated_at"] = utcnow()
@@ -345,15 +359,16 @@ def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str,
     _validate_quantity(data, current=current)
     if "name" in data and (not isinstance(data["name"], str) or not data["name"].strip()):
         raise ValueError("name is required")
-    if "model" in data and (not isinstance(data["model"], str) or not data["model"].strip()):
-        raise ValueError("model is required")
-    model = data.get("model", current["model"] if current else None)
+    model = (data.get("model", current["model"] if current else None) or "").strip()
     variant = data.get("variant", current["variant"] if current else None)
-    duplicate = product_by_model(conn, model, variant) if model else None
+    name = data.get("name", current["name"] if current else "")
+    duplicate = product_by_identity(conn, model, name, variant)
     if duplicate and duplicate["id"] != product_id:
         raise ValueError("this exact product model and variant already exists")
     _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
+    if "model" in payload:
+        payload["model"] = model
     if "specs" in data:
         payload["specs_json"] = json.dumps(data["specs"] or {})
     if "components" in data:
@@ -467,7 +482,8 @@ def enrich_listing(
     from . import url_intake
     domain = url_intake.bare_domain(listing.get("url") or "")
     adapter_cls = url_intake.adapter_for_domain(domain) if domain else None
-    automatic = bool(adapter_cls and adapter_cls.slug == listing.get("retailer_adapter"))
+    automatic = bool(product["model"] and adapter_cls
+                     and adapter_cls.slug == listing.get("retailer_adapter"))
     listing["check_capability"] = "AUTOMATIC" if automatic else "MANUAL"
     listing["check_status"] = (
         "BLOCKED" if listing.get("check_error") else
@@ -510,7 +526,7 @@ def enrich_listing(
         delivered, product.get("lowest_known_price")
     )
     listing["verification"] = provenance.verification_map(conn, listing["id"])
-    if listing.get("model_on_page"):
+    if product["model"] and listing.get("model_on_page"):
         listing["model_match"] = (
             normalise_model(listing["model_on_page"]) == normalise_model(product["model"])
         )

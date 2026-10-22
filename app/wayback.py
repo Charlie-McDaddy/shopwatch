@@ -208,6 +208,9 @@ def lookup_listing(
     original_url: str, expected_model: str, budget: RequestBudget | None = None
 ) -> dict:
     """Return only exact-URL, exact-model AUD advertised price evidence."""
+    if not expected_model:
+        return {"status": "no_usable_price", "snapshots": [],
+                "note": "Automatic archive price matching requires a model number."}
     budget = budget or RequestBudget()
     if not public_http_url(original_url):
         return {
@@ -303,6 +306,8 @@ def lookup_listing(
 
 def valid_archive_snapshot(original_url: str, expected_model: str, item: dict) -> dict | None:
     """Return a normalized capture only when its URL, date, variant and AUD amount agree."""
+    if not expected_model:
+        return None
     if not isinstance(item, dict) or not valid_public_http_url(original_url):
         return None
     snapshot_url = item.get("snapshot_url")
