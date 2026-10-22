@@ -335,6 +335,15 @@
       {% if caller is defined %}{{ caller() }}{% endif %}
     </div>
   </div>
+  {% if product.image_url or product.description or product.variant %}
+  <div class="product-identity">
+    {% if product.image_url|safe_url %}<img src="{{ product.image_url|safe_url }}" alt="{{ product.name }}" loading="lazy">{% endif %}
+    <div>
+      {% if product.variant %}<p class="small muted">Variant: {{ product.variant }}</p>{% endif %}
+      {% if product.description %}<p>{{ product.description }}</p>{% endif %}
+    </div>
+  </div>
+  {% endif %}
 
   <p class="verdict {{ product.tone }}">{{ product.verdict_line }}</p>
   {% if product.quantity and product.quantity_unit %}

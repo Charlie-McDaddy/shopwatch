@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import sqlite3
@@ -9,6 +10,7 @@ import zlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from . import pricing, provenance
@@ -16,7 +18,8 @@ from .config import load_config
 from .db import utcnow
 
 PRODUCT_FIELDS = [
-    "name", "model", "brand", "category", "generation", "verdict", "status", "buying_mode", "notes",
+    "name", "model", "variant", "description", "image_url", "brand", "category",
+    "generation", "verdict", "status", "buying_mode", "notes",
     "trigger_price", "excellent_price", "historical_low_price",
     "lowest_known_price", "lowest_known_date", "lowest_known_retailer", "lowest_known_notes",
     "quantity", "quantity_unit",
@@ -273,7 +276,32 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
 
 
+def _validate_image_url(value: Any) -> None:
+    if value in (None, ""):
+        return
+    if not isinstance(value, str):
+        raise ValueError("image URL must be HTTPS on a public host")
+    try:
+        parsed = urlsplit(value.strip())
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError as exc:
+        raise ValueError("image URL must be HTTPS on a public host") from exc
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        raise ValueError("image URL must be HTTPS on a public host")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if "." not in host or host == "localhost" or host.endswith(
+            (".local", ".internal", ".localhost")
+        ):
+            raise ValueError("image URL must be HTTPS on a public host") from None
+    else:
+        if not address.is_global:
+            raise ValueError("image URL must be HTTPS on a public host")
+
+
 def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
+    _validate_image_url(data.get("image_url"))
     _validate_quantity(data)
     _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}
@@ -299,6 +327,8 @@ def create_product(conn: sqlite3.Connection, data: Mapping[str, Any]) -> int:
 
 
 def update_product(conn: sqlite3.Connection, product_id: int, data: Mapping[str, Any]) -> None:
+    if "image_url" in data:
+        _validate_image_url(data["image_url"])
     _validate_quantity(data, current=get_product(conn, product_id))
     _validate_buying_mode(data)
     payload = {k: v for k, v in data.items() if k in PRODUCT_FIELDS}

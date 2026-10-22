@@ -634,6 +634,8 @@ def api_remove_product_group(product_id: int) -> Any:
 @app.post("/api/products", status_code=201)
 def api_create_product(payload: dict = Body(...)) -> Any:
     with session() as conn:
+        if payload.get("model") and store.product_by_model(conn, payload["model"]):
+            raise HTTPException(409, "a product with this exact model is already on the watchlist")
         try:
             product_id = store.create_product(conn, payload)
         except ValueError as exc:

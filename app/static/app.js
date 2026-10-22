@@ -821,7 +821,8 @@ async function wizShowDone(job) {
 wire('btn-new-product', async () => {
   wiz = { index: 0, productId: null, retailers: [], selected: new Set(), pollTimer: null };
   for (const id of ['wiz-name', 'wiz-model', 'wiz-brand', 'wiz-notes', 'wiz-trigger',
-    'wiz-excellent', 'wiz-histlow', 'wiz-new-retailer', 'wiz-new-group']) {
+    'wiz-excellent', 'wiz-histlow', 'wiz-new-retailer', 'wiz-new-group',
+    'wiz-variant', 'wiz-description', 'wiz-image-url']) {
     document.getElementById(id).value = '';
   }
   document.getElementById('wiz-category').value = 'general';
@@ -1086,7 +1087,8 @@ wire('wiz-next', async () => {
     } else if (step === 'optional') {
       const product = await api('/api/products', { method: 'POST', body: {
         name: wizVal('wiz-name'), model: wizVal('wiz-model'), brand: wizVal('wiz-brand') || null,
-        category: wizVal('wiz-category') || 'general', verdict: wizVal('wiz-verdict'),
+        variant: wizVal('wiz-variant') || null, description: wizVal('wiz-description') || null,
+        image_url: wizVal('wiz-image-url') || null, category: wizVal('wiz-category') || 'general', verdict: wizVal('wiz-verdict'),
         notes: wizVal('wiz-notes') || null,
       }});
       wiz.productId = product.id;
