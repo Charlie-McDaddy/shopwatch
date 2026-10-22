@@ -769,6 +769,28 @@ systemctl --user daemon-reload
 systemctl --user enable --now shopwatch.service shopwatch-research-runner.service
 ```
 
+For scheduled checks on this WSL host, install the native scheduler units after
+completing the monitoring and notification checks in #14:
+
+```bash
+cp deploy/shopwatch-scheduler.user.service ~/.config/systemd/user/shopwatch-scheduler.service
+cp deploy/shopwatch-scheduler.user.timer ~/.config/systemd/user/shopwatch-scheduler.timer
+systemctl --user daemon-reload
+systemctl --user enable --now shopwatch-scheduler.timer
+systemctl --user list-timers shopwatch-scheduler.timer
+journalctl --user -u shopwatch-scheduler.service -n 50
+```
+
+Both the app and scheduler optionally read `~/.config/shopwatch/app.env`. Keep it
+at mode `0600`; use it for the household ntfy destination/token and any shared
+`SHOPWATCH_DB` override. The research runner's separate `research.env` holds its
+proxy connection settings. The scheduler polls every 15 minutes, executes one
+catch-up check per overdue active product, and queues weekly seller discovery.
+Saved per-product cadence, pause, archive and timezone settings control eligibility.
+Stop automatic checks with `systemctl --user stop shopwatch-scheduler.timer`;
+pause a card to stop its work while retaining its history. An already running
+service can be stopped with `systemctl --user stop shopwatch-scheduler.service`.
+
 Open `http://localhost:8477/`. The app binds to loopback; the research runner polls
 every 10 seconds. The units use the existing `data/shopwatch.db` and never source the
 original owner's `/srv/prod/career/runner.env`. User services require a running WSL
@@ -877,7 +899,16 @@ That was a deliberate decision, made in #7, not a default inherited by accident.
 
 ### Scheduling the watch
 
-**There is no timer, and the reason is egress monitoring, not scraping.**
+**The 2026-09-11 manual-only decision below is superseded by per-product schedules
+and the optional scheduler units.** Enabling them still requires the bounded
+operational checks in #14: approve ordinary retailer traffic through the host's
+existing monitoring process, verify notifications, then verify an actual due run
+and catch-up. Do not disable monitoring or allow broad shared-hosting IP ranges.
+The WSL native units are documented above; the Docker recipes below describe opti.
+No Shopwatch timer was enabled on this WSL host during the 22 October 2026 check.
+
+The following records the original opti blocker and historical measurements; it is
+not current retailer capability evidence.
 
 The reason recorded here used to be "three of the five seeded retailers cannot be
 scraped at all, so a schedule would be a no-op that looks like coverage". That was
@@ -908,7 +939,7 @@ be suppressed cleanly:
 * leaving it alone trains you to ignore `security-events`, which is the one topic that
   has to keep meaning "something is wrong"
 
-**Decision, 2026-09-11: run it by hand, no timer.** Two of four watchable listings
+**Superseded decision, 2026-09-11: run it by hand, no timer.** Two of four watchable listings
 refresh, and both sit around $700 above the trigger, so automation buys very little
 today. That is not worth weakening egress monitoring for. Revisit if an Appliances
 Online adapter gets written, since they are the only reachable retailer in the price
