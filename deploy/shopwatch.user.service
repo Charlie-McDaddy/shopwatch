@@ -1,0 +1,11 @@
+[Unit]
+Description=Shopwatch household watchlist
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/coding/shopwatch
+ExecStart=%h/coding/shopwatch/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8477
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

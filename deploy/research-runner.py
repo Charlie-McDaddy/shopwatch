@@ -1,29 +1,21 @@
 #!/usr/bin/env python3
-"""The wizard's "let's go" step, run from opti - never from inside the shopwatch container.
+"""Process GUI research queues on the always-on host, outside the web container.
 
-Mirrors app/mailwatch.py's existing wiring exactly: runs as a host-level script in its
-own venv, sources the Claude Code OAuth token that already exists in
-/srv/prod/career/runner.env (nothing new to store or rotate), and talks to the running
-shopwatch container over plain HTTP on the docker network. The container never holds
-this credential and never gains new outbound egress - only this script does.
+Set SHOPWATCH_RESEARCH_BACKEND=cliproxy to use the existing local CLIProxyAPI OAuth
+route, with SHOPWATCH_CLIPROXY_MODEL and SHOPWATCH_CLIPROXY_API_KEY configured only
+for this runner. The default claude backend retains the original explicit Claude
+Code subscription-token connection; it never falls back to API credentials.
 
-Also claims app/retailer_search.py's queue: same host-level shape, but calling the
-self-hosted Firecrawl instance on opti's own loopback (127.0.0.1:3002 by default,
-$FIRECRAWL_URL/--firecrawl-url override it) instead of the Claude CLI. Firecrawl sits
-on its own docker network, bound to 127.0.0.1 on the host, and is not reachable from the
-shopwatch container's own docker network - this script CAN reach it because it runs
-directly on the opti host, not inside a container. That is the whole reason this queue
-is claimed here rather than called directly from app/main.py.
+For this WSL fork, use the native user services documented under "Product and
+retailer research" in README.md. No opti machine or /srv/prod/career environment is
+required. The inherited deploy/shopwatch-research-runner.sh and timer still describe
+the original owner's opti Docker deployment.
 
-    ssh root@YOUR-SERVER-IP
-    set -a; . /srv/prod/career/runner.env; set +a
-    cd /srv/prod/shopwatch/repo
-    export SHOPWATCH_URL="http://$(docker inspect shopwatch --format \
-        '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'):8477"
-    /srv/prod/shopwatch/research-venv/bin/python deploy/research-runner.py --interval 10
+Model suggestions, retailer research and historical findings share the selected
+connection. Retailer-search jobs use that same connection with cliproxy selected,
+or the original self-hosted Firecrawl service with the claude backend.
 
-Wired into opti as shopwatch-research-runner.timer, firing every 2 minutes via
-shopwatch-research-runner.sh (see deploy/).
+    SHOPWATCH_URL=http://127.0.0.1:8477 .venv/bin/python deploy/research-runner.py
 
 Default-deny is enforced server-side (research.create_job only ever queues retailer ids
 that already exist in shopwatch's own retailers table), so this script never has to
@@ -103,11 +95,59 @@ CLAUDE_BILLING_OVERRIDES = (
 
 
 class SubscriptionAccessUnavailable(RuntimeError):
-    """The host has no Claude.ai OAuth token configured for subscription-backed jobs."""
+    """The selected subscription research connection is unavailable."""
 
 
-def _run_subscription_claude(args: list[str], prompt: str, timeout: int) -> Any:
-    """Run Claude with the explicit subscription token and no API/provider overrides."""
+def _run_cliproxy(args: list[str], prompt: str, timeout: int) -> Any:
+    key = os.environ.get("SHOPWATCH_CLIPROXY_API_KEY")
+    model = os.environ.get("SHOPWATCH_CLIPROXY_MODEL")
+    if not key or not model:
+        raise SubscriptionAccessUnavailable(
+            "Configure SHOPWATCH_CLIPROXY_API_KEY and SHOPWATCH_CLIPROXY_MODEL on the "
+            "research host for an OAuth-only route, then retry."
+        )
+    if "--allowedTools" in args and args[args.index("--allowedTools") + 1] == "WebFetch":
+        raise SubscriptionAccessUnavailable(
+            "The proxy search connection cannot verify URL-only page reads. "
+            "Use a supported retailer check or update this listing manually."
+        )
+    try:
+        response = requests.post(
+            "http://127.0.0.1:8317/v1/responses",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "input": prompt, "tools": [{"type": "web_search"}],
+                  "max_output_tokens": 4000, "store": False},
+            timeout=timeout, allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise ValueError("proxy request failed")
+        data = response.json()
+        output = data.get("output", [])
+        searched = any(item.get("type") == "web_search_call" and
+                       item.get("status") == "completed" for item in output)
+        text = "\n".join(
+            part["text"] for item in output if item.get("type") == "message"
+            for part in item.get("content", []) if part.get("type") == "output_text"
+        )
+        if data.get("status") != "completed" or not searched or not text:
+            raise ValueError("search did not complete")
+    except requests.Timeout as exc:
+        raise subprocess.TimeoutExpired("CLIProxyAPI", timeout) from exc
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise SubscriptionAccessUnavailable(
+            "CLIProxyAPI search could not complete. Reconnect the selected OAuth account "
+            "in the local proxy, check web-search access, then retry. No paid fallback was used."
+        ) from exc
+    return subprocess.CompletedProcess(args, 0, stdout=text, stderr="")
+
+
+def _run_research(args: list[str], prompt: str, timeout: int) -> Any:
+    """Use only the explicitly selected research connection, with no paid fallback."""
+    backend = os.environ.get("SHOPWATCH_RESEARCH_BACKEND", "claude")
+    if backend == "cliproxy":
+        return _run_cliproxy(args, prompt, timeout)
+    if backend != "claude":
+        raise SubscriptionAccessUnavailable("Select a claude or cliproxy research backend.")
     token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if not token:
         raise SubscriptionAccessUnavailable(
@@ -480,7 +520,7 @@ def research_one_retailer(
         )
         allowed_tools = "WebSearch,WebFetch"
     try:
-        proc = _run_subscription_claude(
+        proc = _run_research(
             [claude_bin, "-p", "--allowedTools", allowed_tools], prompt,
             RETAILER_TIMEOUT_SECONDS,
         )
@@ -530,7 +570,7 @@ def research_historical_low(
         excluded_section=_excluded_retailers_section(excluded_names),
     )
     try:
-        proc = _run_subscription_claude(
+        proc = _run_research(
             [claude_bin, "-p", "--allowedTools", "WebSearch,WebFetch"], prompt,
             HISTORICAL_LOW_TIMEOUT_SECONDS,
         )
@@ -701,7 +741,7 @@ def poll_llm_once(base_url: str, claude_bin: str) -> bool:
             parse = helper.parse_web_retailer_reply
         else:
             raise RuntimeError("this job kind is not supported by the server runner")
-        proc = _run_subscription_claude(
+        proc = _run_research(
             [claude_bin, "-p", "--allowedTools", "WebSearch"],
             prompt, LLM_TIMEOUT_SECONDS,
         )
@@ -715,16 +755,14 @@ def poll_llm_once(base_url: str, claude_bin: str) -> bool:
     except subprocess.TimeoutExpired:
         failed = requests.post(
             job_url,
-            json={"status": "FAILED", "error": "Claude Code search timed out; retry the job."},
+            json={"status": "FAILED", "error": "Research timed out; retry the job."},
             timeout=30,
         )
         failed.raise_for_status()
-    except SubscriptionAccessUnavailable:
+    except SubscriptionAccessUnavailable as exc:
         failed = requests.post(
             job_url,
-            json={"status": "FAILED", "error": (
-                "Claude subscription OAuth token is not configured on the research host."
-            )},
+            json={"status": "FAILED", "error": str(exc)},
             timeout=30,
         )
         failed.raise_for_status()
@@ -732,7 +770,7 @@ def poll_llm_once(base_url: str, claude_bin: str) -> bool:
         failed = requests.post(
             job_url,
             json={"status": "FAILED", "error": (
-                "Claude Code returned no usable sourced results. Retry the search."
+                "Research returned no usable sourced results. Retry the search."
             )},
             timeout=30,
         )
@@ -849,10 +887,31 @@ def discover_retailers(
 
 def process_retailer_search_job(base_url: str, firecrawl_url: str, job: dict[str, Any]) -> None:
     query = json.loads(job["query"])
-    result = discover_retailers(
-        firecrawl_url, query.get("product_name", ""), query.get("model", ""),
-        query.get("excluded_names") or [], query.get("excluded_homepages") or [],
-    )
+    if os.environ.get("SHOPWATCH_RESEARCH_BACKEND") == "cliproxy":
+        prompt = (
+            "Use web search to find Australian retailers selling this exact product. "
+            "Exclude the supplied retailer names and homepages; never substitute a variant. "
+            "Return only JSON: {\"retailers\":[{\"name\":\"retailer name\","
+            "\"homepage\":\"public homepage URL\",\"source_url\":\"exact product page URL\","
+            "\"source_title\":\"page title containing the exact model\"}],\"note\":null}. "
+            "Return an empty list if no sourced matches exist. Do not invent URLs or titles.\n"
+            + json.dumps(query)
+        )
+        proc = _run_research(["claude", "-p", "--allowedTools", "WebSearch"],
+                             prompt, LLM_TIMEOUT_SECONDS)
+        try:
+            result = _last_json_object(proc.stdout, 0)
+        except ValueError:
+            raise ValueError(
+                "Research returned no usable retailer results. Retry the search."
+            ) from None
+        if not isinstance(result.get("retailers"), list):
+            raise ValueError("Research returned no retailer list. Retry the search.")
+    else:
+        result = discover_retailers(
+            firecrawl_url, query.get("product_name", ""), query.get("model", ""),
+            query.get("excluded_names") or [], query.get("excluded_homepages") or [],
+        )
     requests.post(
         f"{base_url}/api/retailer-search-jobs/{job['id']}/complete",
         json={"status": "DONE", "result": json.dumps(result)}, timeout=30,
