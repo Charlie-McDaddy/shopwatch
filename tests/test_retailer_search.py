@@ -213,6 +213,32 @@ def test_completion_keeps_exact_model_page_as_unpriced_listing_once(conn):
     assert conn.execute("SELECT COUNT(*) FROM listings WHERE product_id = ?", (product_id,)).fetchone()[0] == 1
 
 
+def test_variant_discovery_preserves_sibling_variant_page_for_review_without_attaching(conn):
+    from app import store
+
+    vanilla_id = store.create_product(conn, {
+        "name": "Protein powder", "model": "PRO-1", "variant": "Vanilla 1 kg",
+    })
+    store.create_product(conn, {
+        "name": "Protein powder", "model": "PRO-1", "variant": "Chocolate 1 kg",
+    })
+    job_id = retailer_search.request_product_discovery(conn, vanilla_id)
+    retailer_search.complete_job(conn, job_id, "DONE", result=json.dumps({"retailers": [{
+        "name": "Example Store", "homepage": "https://example.com.au",
+        "source_url": "https://example.com.au/pro-1-chocolate",
+        "source_title": "PRO-1 Chocolate 1 kg",
+    }]}))
+
+    result = json.loads(retailer_search.get_job(conn, job_id)["result"])
+    candidate = result["retailers"][0]
+    assert candidate["source_url"] == "https://example.com.au/pro-1-chocolate"
+    assert candidate["source_title"] == "PRO-1 Chocolate 1 kg"
+    assert candidate["needs_review"] is True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM listings WHERE product_id = ?", (vanilla_id,)
+    ).fetchone()[0] == 0
+
+
 def test_completion_does_not_create_listing_for_another_model_or_homepage(conn):
     from app import store
 

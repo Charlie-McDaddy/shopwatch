@@ -43,6 +43,11 @@ Saving a URL does not establish automatic coverage. Use the listing's manual upd
 controls; do not bypass access restrictions. Supported adapters remain independent
 of the AI connection, but their current live retailer coverage was not remeasured.
 
+Retailer discovery checks the complete model token in a sourced page title. For cards
+with a variant, results remain review suggestions with their source URL/title; the
+system does not yet validate variant evidence strongly enough to attach pages
+automatically or begin price checks.
+
 ## Remaining operational gates (#14)
 
 No Shopwatch app, research-runner or scheduler units are installed/enabled on this

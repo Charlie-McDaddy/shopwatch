@@ -212,7 +212,8 @@ def complete_job(
         raise ValueError("job is already complete")
     if status == "DONE" and job["product_id"] is not None:
         product = conn.execute(
-            "SELECT archived, status, model FROM products WHERE id = ?", (job["product_id"],)
+            "SELECT archived, status, model, variant FROM products WHERE id = ?",
+            (job["product_id"],)
         ).fetchone()
         if (product is None or product["archived"]
                 or product["status"] not in {"ACTIVE", "PURCHASED"}):
@@ -222,7 +223,8 @@ def complete_job(
         else:
             try:
                 result = _retain_discovered_listings(
-                    conn, job["product_id"], product["model"], result
+                    conn, job["product_id"], product["model"], result,
+                    variant=product["variant"],
                 )
             except ValueError as exc:
                 status, result, error = "FAILED", None, str(exc)
@@ -240,8 +242,9 @@ def complete_job(
 
 def _retain_discovered_listings(
     conn: sqlite3.Connection, product_id: int, model: str, result: str | None,
+    *, variant: str | None = None,
 ) -> str:
-    """Retain only public, exact-model product pages as empty, unverified listings."""
+    """Retain public model pages; variant-bearing pages require user review."""
     from . import store
     from .urls import public_http_url
 
@@ -277,18 +280,20 @@ def _retain_discovered_listings(
             continue
         if homepage and not public_http_url(homepage):
             homepage = ""
+        # shortcut: model evidence alone cannot safely distinguish product variants.
         exact_page = bool(source_url and public_http_url(source_url)
                           and matches_exact_model(model, source_title))
         domain = bare_domain(homepage) if homepage else None
         marketplace = bool(exact_page and is_marketplace_url(source_url))
+        variant_requires_review = bool(variant)
         if (not marketplace and
                 (name.casefold() in existing_names or (domain and domain in existing_domains))):
             continue
         item = {"name": name, "homepage": homepage or None,
                 "source_url": source_url if exact_page else None,
                 "source_title": source_title[:500] if exact_page else None,
-                "needs_review": marketplace}
-        if exact_page and not marketplace:
+                "needs_review": marketplace or variant_requires_review}
+        if exact_page and not marketplace and not variant_requires_review:
             retailer = store.ensure_retailer(conn, name, homepage=homepage or None)
             existing = conn.execute(
                 "SELECT id FROM listings WHERE product_id = ? AND retailer_id = ?",
